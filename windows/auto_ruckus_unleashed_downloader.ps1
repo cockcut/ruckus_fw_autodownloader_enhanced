@@ -2,7 +2,7 @@
 # Ruckus Unleashed Firmware Auto Downloader for Windows
 # - Parallel Downloading Support (Max 3 Concurrent)
 # =================================================================
-$Version = "v2.1.0"
+$Version = "v2.1.1"
 
 # Windows Forms 어셈블리 로드 및 예외 처리 모드 선언 (스크립트 시작 시 1회만 실행)
 Add-Type -AssemblyName System.Windows.Forms
