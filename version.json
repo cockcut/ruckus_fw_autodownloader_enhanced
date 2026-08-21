@@ -1,6 +1,6 @@
 {
-  "universal_version": "1.1.5",
-  "unleashed_version": "2.1.5",
+  "universal_version": "1.1.6",
+  "unleashed_version": "2.1.6",
   "universal_ps1_url": "https://raw.githubusercontent.com/cockcut/ruckus_fw_autodownloader_enhanced/refs/heads/main/windows/auto_ruckus_downloader.ps1",
   "unleashed_ps1_url": "https://raw.githubusercontent.com/cockcut/ruckus_fw_autodownloader_enhanced/refs/heads/main/windows/auto_ruckus_unleashed_downloader.ps1",
   "python_script_url": "https://raw.githubusercontent.com/cockcut/ruckus_fw_autodownloader_enhanced/refs/heads/main/windows/get_ruckus_cookie.py"
