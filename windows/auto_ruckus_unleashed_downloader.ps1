@@ -1,5 +1,5 @@
 ﻿# =================================================================
-# Ruckus Unleashed Firmware Auto Downloader for Windows (v2.1.6)
+# Ruckus Unleashed Firmware Auto Downloader for Windows (v2.1.5)
 # - Parallel Downloading Support (Max 3 Concurrent)
 # =================================================================
 
@@ -24,7 +24,7 @@ $RUCKUS_USER = $env:RUCKUS_USER
 $RUCKUS_PASS = $env:RUCKUS_PASS
 
 Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "   Ruckus Unleashed Firmware Auto Downloader (v2.1.6)" -ForegroundColor Cyan
+Write-Host "   Ruckus Unleashed Firmware Auto Downloader (v2.1.5)" -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 
 # -----------------------------------------------------------------
