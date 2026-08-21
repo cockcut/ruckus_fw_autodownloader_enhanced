@@ -23,7 +23,7 @@ $RUCKUS_USER = $env:RUCKUS_USER
 $RUCKUS_PASS = $env:RUCKUS_PASS
 
 Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "   Ruckus Universal Firmware Auto Downloader (v1.1.7)" -ForegroundColor Cyan
+Write-Host "   Ruckus Universal Firmware Auto Downloader (v1.1.5)" -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 
 # -----------------------------------------------------------------
