@@ -262,7 +262,6 @@ while ($NeedLogin) {
         Write-Host ""
         Write-Host "=================================================" -ForegroundColor Red
         Write-Host "[-] 로그인에 실패했습니다. 다시 시도하세요." -ForegroundColor Red
-        Write-Host "[!] '$TargetCookieName' 인증 쿠키가 생성되지 않았거나 유효하지 않습니다." -ForegroundColor Yellow
         Write-Host "=================================================" -ForegroundColor Red
 
         # 실패한 쿠키 삭제 후 이메일/비밀번호 입력 단계부터 재시도
