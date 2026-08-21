@@ -4,7 +4,7 @@
 # - Automatic Model Name Prefixing for version-only .bl7 files
 # - Parallel Downloading Support (Max 3 Concurrent)
 # =================================================================
-$Version = "v1.1.0"
+$Version = "v1.2.0"
 
 # Windows Forms 어셈블리 로드 및 예외 처리 모드 선언 (스크립트 시작 시 1회만 실행)
 Add-Type -AssemblyName System.Windows.Forms
