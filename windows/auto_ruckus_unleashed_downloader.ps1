@@ -1,5 +1,5 @@
 ﻿# =================================================================
-# Ruckus Unleashed Firmware Auto Downloader for Windows (v2.1.6)
+# Ruckus Unleashed Firmware Auto Downloader for Windows (v2.1.0)
 # - Parallel Downloading Support (Max 3 Concurrent)
 # =================================================================
 
