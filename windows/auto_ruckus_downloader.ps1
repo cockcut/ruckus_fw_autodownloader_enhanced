@@ -1,5 +1,5 @@
 ﻿# =================================================================
-# Ruckus Firmware Auto Downloader (v1.1.7)
+# Ruckus Firmware Auto Downloader (v1.1.5)
 # - Universal Ruckus Product Line Support (APs, ICX, vSZ, Unleashed)
 # - Automatic Model Name Prefixing for version-only .bl7 files
 # - Parallel Downloading Support (Max 3 Concurrent)
