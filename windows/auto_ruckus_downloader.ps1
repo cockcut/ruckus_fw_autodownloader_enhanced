@@ -1,5 +1,5 @@
 # =================================================================
-# Ruckus Firmware Auto Downloader (v1.1.1)
+# Ruckus Firmware Auto Downloader (v1.1.0)
 # - Universal Ruckus Product Line Support (APs, ICX, vSZ, Unleashed)
 # - Automatic Model Name Prefixing for version-only .bl7 files
 # - Parallel Downloading Support (Max 3 Concurrent)
@@ -23,7 +23,7 @@ $RUCKUS_USER = $env:RUCKUS_USER
 $RUCKUS_PASS = $env:RUCKUS_PASS
 
 Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "   Ruckus Universal Firmware Auto Downloader (v1.1.1)" -ForegroundColor Cyan
+Write-Host "   Ruckus Universal Firmware Auto Downloader (v1.1.0)" -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 
 # -----------------------------------------------------------------
