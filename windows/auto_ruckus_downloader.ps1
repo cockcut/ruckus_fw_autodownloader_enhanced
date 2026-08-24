@@ -2,6 +2,7 @@
 # Ruckus Firmware Auto Downloader for Windows
 # - Universal Ruckus Product Line Support (APs, ICX, vSZ, Unleashed)
 # - Automatic Model Name Prefixing for version-only .bl7 files
+# - Memory Caching for Parsed File Lists
 # - Parallel Downloading Support (Max 3 Concurrent)
 # =================================================================
 $Version = "v1.2.0"
