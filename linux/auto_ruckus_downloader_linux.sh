@@ -6,7 +6,7 @@
 # - Memory caching of file list (parse once per version)
 # - Filename extraction from Location / Content-Disposition
 # =================================================================
-Version="v1.2.0"
+Version="v1.2.1"
 
 # -----------------------------------------------------------------
 # GitHub 자동 업데이트 확인 및 실행
