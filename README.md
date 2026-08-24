@@ -1,3 +1,5 @@
+※ 주의 : 스크립트 파일 오류시 파일을 utf8-bom으로 변경해야함.
+
 # ruckus_fw_autodownloader_enhanced(윈도우용)
 루커스 제품 다운로더 및 루커스 언리시드 전용 다운로더
 
