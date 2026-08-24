@@ -223,7 +223,8 @@ while ($NeedLogin) {
             Write-Host $line
         }
     }
-
+    
+    # Python 로그인 스크립트 자체 실행 실패
     if ($pyExitCode -ne 0) {
         Write-Host ""
         Write-Host "=================================================" -ForegroundColor Red
