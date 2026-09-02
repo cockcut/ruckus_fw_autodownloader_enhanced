@@ -1,890 +1,717 @@
 ﻿# =================================================================
-# Ruckus Firmware Auto Downloader
-# - Universal Ruckus Product Line Support (APs, ICX, vSZ, Unleashed)
-# - Automatic Model Name Prefixing for version-only .bl7 files
-# - Parallel Downloading Support (Max 3 Concurrent)
+# Ruckus Firmware Auto Downloader - Full GUI Edition (v1.1.0)
+# - Windows Forms Full GUI Interface
+# - Universal Support (AP, ICX, vSZ, Unleashed)
+# - Auto Session Verification & Parallel Downloader
+# - 'ALL' version query: Iterates through all individual versions without pagination
+# - Added: Real-time Search/Filter & Column Sorting
+# - Added: Automatic model prefixing for 'rcks_fw.bl7' type files
 # =================================================================
-$Version = "v1.2.0"
 
-# Windows Forms 어셈블리 로드 및 예외 처리 모드 선언 (스크립트 시작 시 1회만 실행)
+if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne "STA") {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "powershell.exe"
+    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`""
+    $psi.UseShellExecute = $false
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.WaitForExit()
+    exit $p.ExitCode
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
 
 $ErrorActionPreference = "Stop"
-
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
 $COOKIE_FILE   = Join-Path $PSScriptRoot "cookies.txt"
 $PYTHON_SCRIPT = Join-Path $PSScriptRoot "get_ruckus_cookie.py"
 $BASE_URL      = "https://support.ruckuswireless.com"
+$UA            = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-$RUCKUS_USER = $env:RUCKUS_USER
-$RUCKUS_PASS = $env:RUCKUS_PASS
-
-Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "   Ruckus Universal Firmware Auto Downloader ($Version)" -ForegroundColor Cyan
-Write-Host "=======================================================" -ForegroundColor Cyan
-
-# -----------------------------------------------------------------
-# [단계 0] Python 환경 및 필수 패키지 점검
-# -----------------------------------------------------------------
-Write-Host "[0/5] 필수 패키지 및 모듈 설치 상태 확인 중..." -ForegroundColor Yellow
-
-$pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-if (-not $pythonCmd -or $pythonCmd.Source -match "WindowsApps") {
-    Write-Host "[!] Python이 설치되어 있지 않습니다. winget으로 설치를 진행합니다..." -ForegroundColor Yellow
-    winget install --id Python.Python.3.12 --source winget --scope user --silent --accept-package-agreements --accept-source-agreements
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+# ListView 컬럼 정렬을 위한 Comparer 클래스 정의
+class ListViewComparer : System.Collections.IComparer {
+    [int]$Column
+    [bool]$Ascending
+    ListViewComparer([int]$col, [bool]$asc) {
+        $this.Column = $col
+        $this.Ascending = $asc
+    }
+    [int] Compare([object]$x, [object]$y) {
+        $cx = $x.SubItems[$this.Column].Text
+        $cy = $y.SubItems[$this.Column].Text
+        
+        $result = [string]::Compare($cx, $cy)
+        if (-not $this.Ascending) { $result = -$result }
+        return $result
+    }
 }
 
-$pyExe = (Get-Command python -ErrorAction SilentlyContinue).Source
-if (-not $pyExe -or $pyExe -match "WindowsApps") {
-    $pyExe = Join-Path $env:LocalAppData "Programs\Python\Python312\python.exe"
+function Test-PythonEnv {
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $pythonCmd -or $pythonCmd.Source -match "WindowsApps") {
+        winget install --id Python.Python.3.12 --source winget --scope user --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+    }
+    $pyExe = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if (-not $pyExe -or $pyExe -match "WindowsApps") {
+        $pyExe = Join-Path $env:LocalAppData "Programs\Python\Python312\python.exe"
+    }
+    if (-not (Test-Path $pyExe)) { return $null }
+    $modules = @{ "requests"="requests"; "bs4"="beautifulsoup4"; "lxml"="lxml" }
+    foreach ($importName in $modules.Keys) {
+        $pkgName = $modules[$importName]
+        $checkScript = "import sys, importlib.util; sys.exit(0 if importlib.util.find_spec('$importName') else 1)"
+        & "$pyExe" -c "$checkScript"
+        if ($LASTEXITCODE -ne 0) { & "$pyExe" -m pip install $pkgName --quiet }
+    }
+    return $pyExe
 }
 
-if (-not (Test-Path $pyExe)) {
-    Write-Host "[-] Python 설치 또는 경로 인식에 실패했습니다. 파이썬을 수동으로 설치 후 다시 실행해 주세요." -ForegroundColor Red
-    exit 1
+function Test-CookieValid {
+    if (-not (Test-Path $COOKIE_FILE)) { return $false }
+    $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $cookieLines = Get-Content $COOKIE_FILE -Encoding UTF8 -ErrorAction SilentlyContinue
+    foreach ($line in $cookieLines) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) { continue }
+        $parts = $line.Split("`t")
+        if ($parts.Count -ge 7 -and $parts[5].Trim() -eq "production_ruckus_support") {
+            $expEpoch = 0
+            if ([long]::TryParse($parts[4].Trim(), [ref]$expEpoch)) {
+                if ($expEpoch -gt $nowEpoch) { return $true }
+            }
+        }
+    }
+    return $false
 }
 
-$modules = @{
-    "requests" = "requests"
-    "bs4"      = "beautifulsoup4"
-    "lxml"     = "lxml"
+function Clear-SessionLists {
+    $cmbProd.Items.Clear()
+    $cmbVer.Items.Clear()
+    $listView.Items.Clear()
+    $script:ProductDataList = @()
+    $script:FileDataList = @()
+    $lblSelectedInfo.Text = "제품을 불러오려면 로그인이 필요합니다."
 }
 
-foreach ($importName in $modules.Keys) {
-    $pkgName = $modules[$importName]
-    $checkScript = "import sys, importlib.util; sys.exit(0 if importlib.util.find_spec('$importName') else 1)"
-    & "$pyExe" -c "$checkScript"
+$mainForm = New-Object System.Windows.Forms.Form
+$mainForm.Text = "Ruckus Firmware Auto Downloader v1.1.0 (GUI)"
+$mainForm.Size = New-Object System.Drawing.Size(850, 710)
+$mainForm.StartPosition = "CenterScreen"
+$mainForm.FormBorderStyle = "FixedSingle"
+$mainForm.MaximizeBox = $false
+
+$fontLabel = New-Object System.Drawing.Font("맑은 고딕", 9, [System.Drawing.FontStyle]::Regular)
+$fontBold  = New-Object System.Drawing.Font("맑은 고딕", 9, [System.Drawing.FontStyle]::Bold)
+
+$grpLogin = New-Object System.Windows.Forms.GroupBox
+$grpLogin.Text = " 1. Ruckus 계정 세션 관리 "
+$grpLogin.Location = New-Object System.Drawing.Point(15, 10)
+$grpLogin.Size = New-Object System.Drawing.Size(805, 75)
+$grpLogin.Font = $fontBold
+$mainForm.Controls.Add($grpLogin)
+
+$lblUser = New-Object System.Windows.Forms.Label
+$lblUser.Text = "Email:"
+$lblUser.Location = New-Object System.Drawing.Point(15, 30)
+$lblUser.Size = New-Object System.Drawing.Size(45, 20)
+$lblUser.Font = $fontLabel
+$grpLogin.Controls.Add($lblUser)
+
+$txtUser = New-Object System.Windows.Forms.TextBox
+$txtUser.Location = New-Object System.Drawing.Point(65, 27)
+$txtUser.Size = New-Object System.Drawing.Size(170, 23)
+$txtUser.Text = $env:RUCKUS_USER
+$txtUser.Font = $fontLabel
+$grpLogin.Controls.Add($txtUser)
+
+$lblPass = New-Object System.Windows.Forms.Label
+$lblPass.Text = "PW:"
+$lblPass.Location = New-Object System.Drawing.Point(242, 30)
+$lblPass.Size = New-Object System.Drawing.Size(30, 20)
+$lblPass.Font = $fontLabel
+$grpLogin.Controls.Add($lblPass)
+
+$txtPass = New-Object System.Windows.Forms.TextBox
+$txtPass.Location = New-Object System.Drawing.Point(274, 27)
+$txtPass.Size = New-Object System.Drawing.Size(130, 23)
+$txtPass.PasswordChar = '*'
+$txtPass.Text = $env:RUCKUS_PASS
+$txtPass.Font = $fontLabel
+$grpLogin.Controls.Add($txtPass)
+
+$btnLogin = New-Object System.Windows.Forms.Button
+$btnLogin.Text = "로그인 및 세션 갱신"
+$btnLogin.Location = New-Object System.Drawing.Point(412, 25)
+$btnLogin.Size = New-Object System.Drawing.Size(130, 27)
+$btnLogin.Font = $fontLabel
+$grpLogin.Controls.Add($btnLogin)
+
+$btnClearCookie = New-Object System.Windows.Forms.Button
+$btnClearCookie.Text = "쿠키 삭제"
+$btnClearCookie.Location = New-Object System.Drawing.Point(548, 25)
+$btnClearCookie.Size = New-Object System.Drawing.Size(85, 27)
+$btnClearCookie.Font = $fontLabel
+$grpLogin.Controls.Add($btnClearCookie)
+
+$lblSessionStatus = New-Object System.Windows.Forms.Label
+$lblSessionStatus.Text = "세션 상태: 확인 중..."
+$lblSessionStatus.Location = New-Object System.Drawing.Point(640, 30)
+$lblSessionStatus.Size = New-Object System.Drawing.Size(155, 20)
+$lblSessionStatus.Font = $fontLabel
+$grpLogin.Controls.Add($lblSessionStatus)
+
+$grpSelect = New-Object System.Windows.Forms.GroupBox
+$grpSelect.Text = " 2. 제품 및 버전 선택 "
+$grpSelect.Location = New-Object System.Drawing.Point(15, 95)
+$grpSelect.Size = New-Object System.Drawing.Size(805, 90)
+$grpSelect.Font = $fontBold
+$mainForm.Controls.Add($grpSelect)
+
+$lblProd = New-Object System.Windows.Forms.Label
+$lblProd.Text = "제품 선택:"
+$lblProd.Location = New-Object System.Drawing.Point(15, 28)
+$lblProd.Size = New-Object System.Drawing.Size(65, 20)
+$lblProd.Font = $fontLabel
+$grpSelect.Controls.Add($lblProd)
+
+$cmbProd = New-Object System.Windows.Forms.ComboBox
+$cmbProd.Location = New-Object System.Drawing.Point(85, 25)
+$cmbProd.Size = New-Object System.Drawing.Size(320, 23)
+$cmbProd.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$cmbProd.Font = $fontLabel
+$grpSelect.Controls.Add($cmbProd)
+
+$lblVer = New-Object System.Windows.Forms.Label
+$lblVer.Text = "버전 선택:"
+$lblVer.Location = New-Object System.Drawing.Point(420, 28)
+$lblVer.Size = New-Object System.Drawing.Size(65, 20)
+$lblVer.Font = $fontLabel
+$grpSelect.Controls.Add($lblVer)
+
+$cmbVer = New-Object System.Windows.Forms.ComboBox
+$cmbVer.Location = New-Object System.Drawing.Point(490, 25)
+$cmbVer.Size = New-Object System.Drawing.Size(180, 23)
+$cmbVer.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$cmbVer.Font = $fontLabel
+$grpSelect.Controls.Add($cmbVer)
+
+$btnFetchFiles = New-Object System.Windows.Forms.Button
+$btnFetchFiles.Text = "파일 목록 조회"
+$btnFetchFiles.Location = New-Object System.Drawing.Point(680, 23)
+$btnFetchFiles.Size = New-Object System.Drawing.Size(110, 55)
+$btnFetchFiles.Font = $fontLabel
+$grpSelect.Controls.Add($btnFetchFiles)
+
+$lblSelectedInfo = New-Object System.Windows.Forms.Label
+$lblSelectedInfo.Text = "제품을 불러오는 중입니다..."
+$lblSelectedInfo.Location = New-Object System.Drawing.Point(15, 58)
+$lblSelectedInfo.Size = New-Object System.Drawing.Size(655, 20)
+$lblSelectedInfo.Font = $fontLabel
+$lblSelectedInfo.ForeColor = [System.Drawing.Color]::Blue
+$grpSelect.Controls.Add($lblSelectedInfo)
+
+$grpFiles = New-Object System.Windows.Forms.GroupBox
+$grpFiles.Text = " 3. 다운로드 가능 파일 목록 (검색 및 정렬 가능) "
+$grpFiles.Location = New-Object System.Drawing.Point(15, 195)
+$grpFiles.Size = New-Object System.Drawing.Size(805, 410)
+$grpFiles.Font = $fontBold
+$mainForm.Controls.Add($grpFiles)
+
+$lblSearch = New-Object System.Windows.Forms.Label
+$lblSearch.Text = "결과 내 검색:"
+$lblSearch.Location = New-Object System.Drawing.Point(15, 25)
+$lblSearch.Size = New-Object System.Drawing.Size(80, 20)
+$lblSearch.Font = $fontLabel
+$grpFiles.Controls.Add($lblSearch)
+
+$txtSearch = New-Object System.Windows.Forms.TextBox
+$txtSearch.Location = New-Object System.Drawing.Point(95, 23)
+$txtSearch.Size = New-Object System.Drawing.Size(695, 23)
+$txtSearch.Font = $fontLabel
+$grpFiles.Controls.Add($txtSearch)
+
+$listView = New-Object System.Windows.Forms.ListView
+$listView.Location = New-Object System.Drawing.Point(15, 55)
+$listView.Size = New-Object System.Drawing.Size(775, 305)
+$listView.View = [System.Windows.Forms.View]::Details
+$listView.CheckBoxes = $true
+$listView.FullRowSelect = $true
+$listView.GridLines = $true
+$listView.Font = $fontLabel
+[void]$listView.Columns.Add("파일명 (Real File Name)", 280)
+[void]$listView.Columns.Add("용량 (Size)", 90)
+[void]$listView.Columns.Add("소프트웨어 타이틀 (Title)", 380)
+$grpFiles.Controls.Add($listView)
+
+$btnSelectAll = New-Object System.Windows.Forms.Button
+$btnSelectAll.Text = "전체 선택/해제"
+$btnSelectAll.Location = New-Object System.Drawing.Point(15, 370)
+$btnSelectAll.Size = New-Object System.Drawing.Size(110, 28)
+$btnSelectAll.Font = $fontLabel
+$grpFiles.Controls.Add($btnSelectAll)
+
+$btnStartDownload = New-Object System.Windows.Forms.Button
+$btnStartDownload.Text = "선택 파일 다운로드 실행 (최대 3개 병렬)"
+$btnStartDownload.Location = New-Object System.Drawing.Point(540, 367)
+$btnStartDownload.Size = New-Object System.Drawing.Size(250, 33)
+$btnStartDownload.Font = $fontBold
+$btnStartDownload.BackColor = [System.Drawing.Color]::LightSkyBlue
+$grpFiles.Controls.Add($btnStartDownload)
+
+$statusStrip = New-Object System.Windows.Forms.StatusStrip
+$statusLabel = New-Object System.Windows.Forms.ToolStripStatusLabel
+$statusLabel.Text = "준비 완료."
+[void]$statusStrip.Items.Add($statusLabel)
+$mainForm.Controls.Add($statusStrip)
+
+$script:ProductDataList = @()
+$script:FileDataList = @()
+$script:PyExePath = $null
+$script:SelectAllState = $false
+$script:SortColumn = -1
+$script:SortAscending = $true
+
+$listView.add_ColumnClick({
+    param($sender, $e)
+    if ($e.Column -eq $script:SortColumn) {
+        $script:SortAscending = -not $script:SortAscending
+    } else {
+        $script:SortColumn = $e.Column
+        $script:SortAscending = $true
+    }
+    $listView.ListViewItemSorter = [ListViewComparer]::new($script:SortColumn, $script:SortAscending)
+    $listView.Sort()
+})
+
+$txtSearch.add_TextChanged({
+    $keyword = $txtSearch.Text.Trim().ToLower()
+    $listView.Items.Clear()
+    foreach ($fObj in $script:FileDataList) {
+        if ([string]::IsNullOrEmpty($keyword) -or 
+            $fObj.RealFileName.ToLower().Contains($keyword) -or 
+            $fObj.SoftwareTitle.ToLower().Contains($keyword) -or 
+            $fObj.FileSize.ToLower().Contains($keyword)) {
+            
+            $item = New-Object System.Windows.Forms.ListViewItem($fObj.RealFileName)
+            [void]$item.SubItems.Add($fObj.FileSize)
+            [void]$item.SubItems.Add($fObj.SoftwareTitle)
+            $item.Checked = $false
+            [void]$listView.Items.Add($item)
+        }
+    }
+    $listView.ListViewItemSorter = $null
+})
+
+$ParseDetailBlock = {
+    param($pageUrl, $COOKIE_FILE, $UA, $cleanProductName)
+    $detailHtml = & curl.exe -k -s --connect-timeout 15 --max-time 30 -b "$COOKIE_FILE" -H "User-Agent: $UA" "$pageUrl" | Out-String
+    $softwareTitle = "N/A"
+    if ($detailHtml -match '(?is)<title[^>]*>\s*(.*?)\s*</title>') {
+        $fullTitle = [System.Net.WebUtility]::HtmlDecode($Matches[1])
+        $softwareTitle = (($fullTitle -split '\|')[0].Trim() -replace '\s+', ' ')
+    }
+    $realFileName = ""
+    if ($detailHtml -match '(?is)<dt>\s*File Name:\s*</dt>\s*<dd>\s*<a[^>]*>\s*([^<]+?)\s*</a>\s*</dd>') {
+        $realFileName = [System.Net.WebUtility]::HtmlDecode($Matches[1].Trim())
+    }
+    if (-not $realFileName) { $realFileName = [System.IO.Path]::GetFileName($pageUrl) }
     
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[!] 파이썬 $pkgName ($importName) 모듈이 없습니다. 자동 설치를 진행합니다..." -ForegroundColor Yellow
-        & "$pyExe" -m pip install $pkgName --quiet
-    }
-}
-Write-Host "[+] 개발 및 실행 환경 검사 완료." -ForegroundColor Green
-Write-Host "-------------------------------------------------"
-
-# -----------------------------------------------------------------
-# [단계 1] 쿠키 확인 및 로그인 (production_ruckus_support 인증 확인)
-# -----------------------------------------------------------------
-Write-Host "[1/5] 로그인 세션(cookies.txt) 유효성 검사 중..." -ForegroundColor Yellow
-
-$TargetCookieName   = "production_ruckus_support"
-$TargetCookieDomain = "support.ruckuswireless.com"
-
-function Get-RuckusAuthCookie {
-    param(
-        [string]$CookiePath
-    )
-
-    if (-not (Test-Path $CookiePath)) {
-        return $null
-    }
-
-    try {
-        $cookieLines = Get-Content $CookiePath -Encoding UTF8 -ErrorAction Stop
-
-        foreach ($line in $cookieLines) {
-            if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) {
-                continue
-            }
-
-            $parts = $line -split "`t"
-
-            if ($parts.Count -ge 7) {
-                $cookieDomain = $parts[0].Trim()
-                $cookieName   = $parts[5].Trim()
-                $cookieValue  = $parts[6].Trim()
-
-                if (
-                    $cookieDomain -eq $TargetCookieDomain -and
-                    $cookieName -eq $TargetCookieName -and
-                    -not [string]::IsNullOrWhiteSpace($cookieValue)
-                ) {
-                    return $parts
-                }
-            }
-        }
-    }
-    catch {
-        Write-Host "[!] cookies.txt 파일을 확인하는 중 오류가 발생했습니다: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-
-    return $null
-}
-
-function Test-RuckusLoginCookie {
-    param(
-        [string]$CookiePath
-    )
-
-    $authCookie = Get-RuckusAuthCookie -CookiePath $CookiePath
-
-    if (-not $authCookie) {
-        return $false
-    }
-
-    [long]$expEpoch = 0
-
-    if (-not [long]::TryParse($authCookie[4].Trim(), [ref]$expEpoch)) {
-        return $false
-    }
-
-    if ($expEpoch -gt 0) {
-        $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-
-        if ($expEpoch -le $nowEpoch) {
-            return $false
+    # 수정: rcks_fw.bl7 또는 숫자로만 된 .bl7 파일 등 공통 확장자/이름일 경우 모델명 접두사 부여
+    if ($cleanProductName) {
+        if ($realFileName -match '^\d+[\d\.]+\.bl7$' -or $realFileName -eq 'rcks_fw.bl7') {
+            $realFileName = "${cleanProductName}_${realFileName}"
         }
     }
 
-    return $true
-}
-
-$NeedLogin = $true
-
-if (Test-Path $COOKIE_FILE) {
-    if (Test-RuckusLoginCookie -CookiePath $COOKIE_FILE) {
-        $NeedLogin = $false
-        Write-Host "[+] 기존 로그인 세션이 유효합니다." -ForegroundColor Green
-        Write-Host "[+] '$TargetCookieName' 인증 쿠키를 확인했습니다." -ForegroundColor Green
+    $fileSize = "N/A"
+    if ($detailHtml -match '(?is)<dt>\s*File Size:\s*</dt>\s*<dd>\s*([^<]+?)\s*</dd>') {
+        $fileSize = [System.Net.WebUtility]::HtmlDecode($Matches[1].Trim())
     }
-    else {
-        Write-Host "[!] 기존 cookies.txt에 유효한 '$TargetCookieName' 인증 쿠키가 없습니다." -ForegroundColor Yellow
-        Write-Host "[!] 로그인을 다시 진행합니다." -ForegroundColor Yellow
-
-        Remove-Item $COOKIE_FILE -Force -ErrorAction SilentlyContinue
+    return [PSCustomObject]@{
+        PageUrl = $pageUrl
+        RealFileName = $realFileName
+        SoftwareTitle = $softwareTitle
+        FileSize = $fileSize
+        CleanProdName = $cleanProductName
     }
 }
-else {
-    Write-Host "[!] 쿠키 파일이 없습니다. 로그인을 진행합니다." -ForegroundColor Yellow
+
+function Get-FileDetailsParallel {
+    param([string[]]$Urls, [string]$CleanName)
+    if (-not $Urls -or $Urls.Count -eq 0) { return @() }
+    $poolSize = [Math]::Min(8, $Urls.Count)
+    $pool = [runspacefactory]::CreateRunspacePool(1, $poolSize)
+    $pool.Open()
+    $jobs = @()
+    foreach ($u in $Urls) {
+        $ps = [powershell]::Create()
+        $ps.RunspacePool = $pool
+        [void]$ps.AddScript($ParseDetailBlock).AddArgument($u).AddArgument($COOKIE_FILE).AddArgument($UA).AddArgument($CleanName)
+        $jobs += [PSCustomObject]@{ Pipe = $ps; Handle = $ps.BeginInvoke(); Url = $u }
+    }
+    $results = @()
+    foreach ($j in $jobs) {
+        try {
+            $out = $j.Pipe.EndInvoke($j.Handle)
+            if ($out) { $results += $out }
+        } catch {}
+        finally { $j.Pipe.Dispose() }
+    }
+    $pool.Close(); $pool.Dispose()
+    return $results
 }
 
-while ($NeedLogin) {
-    Write-Host ""
-
-    $RUCKUS_USER = $null
-    $RUCKUS_PASS = $null
-
-    $emailRegex = '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-
-    while ([string]::IsNullOrWhiteSpace($RUCKUS_USER) -or ($RUCKUS_USER -notmatch $emailRegex)) {
-        if (-not [string]::IsNullOrWhiteSpace($RUCKUS_USER) -and ($RUCKUS_USER -notmatch $emailRegex)) {
-            Write-Host "[-] 올바른 이메일 형식이 아닙니다. (예: user@example.com)" -ForegroundColor Red
-        }
-
-        Write-Host "Ruckus 이메일 계정을 입력하세요:" -ForegroundColor Cyan
-        $RUCKUS_USER = (Read-Host " >").Trim()
+$btnLogin.add_Click({
+    $user = $txtUser.Text.Trim()
+    $pass = $txtPass.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($user) -or [string]::IsNullOrWhiteSpace($pass)) {
+        [System.Windows.Forms.MessageBox]::Show("이메일과 비밀번호를 모두 입력해주세요.", "알림", "OK", "Warning")
+        return
     }
-
-    while ([string]::IsNullOrWhiteSpace($RUCKUS_PASS)) {
-        Write-Host "Ruckus 비밀번호를 입력하세요:" -ForegroundColor Cyan
-        $SecurePass = Read-Host " >" -AsSecureString
-
-        if ($SecurePass) {
-            $bstr = [IntPtr]::Zero
-
-            try {
-                $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePass)
-                $RUCKUS_PASS = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-
-                if ($RUCKUS_PASS) {
-                    $RUCKUS_PASS = $RUCKUS_PASS.Trim()
-                }
-            }
-            finally {
-                if ($bstr -ne [IntPtr]::Zero) {
-                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-                }
-            }
-        }
-
-        if ([string]::IsNullOrWhiteSpace($RUCKUS_PASS)) {
-            Write-Host "[-] 비밀번호는 빈값일 수 없습니다. 다시 입력해 주세요." -ForegroundColor Red
-        }
-    }
-
-    Write-Host ""
-    Write-Host "[*] 파이썬 로그인 스크립트 실행 중..." -ForegroundColor Yellow
-
+    $statusLabel.Text = "로그인 시도 중..."
+    $mainForm.Refresh()
     Remove-Item $COOKIE_FILE -Force -ErrorAction SilentlyContinue
-
-    $pythonOutput = & "$pyExe" -u "$PYTHON_SCRIPT" -u "$RUCKUS_USER" -p "$RUCKUS_PASS" -o "$COOKIE_FILE" 2>&1
-    $pyExitCode = $LASTEXITCODE
-
-    if ($pyExitCode -ne 0 -and $pythonOutput) {
-        Write-Host ""
-        Write-Host "[로그인 프로그램 메시지]" -ForegroundColor DarkYellow
-        foreach ($line in $pythonOutput) {
-            Write-Host $line
-        }
+    & "$script:PyExePath" -u "$PYTHON_SCRIPT" -u "$user" -p "$pass" -o "$COOKIE_FILE"
+    if (Test-CookieValid) {
+        $lblSessionStatus.Text = "세션 상태: 유효함 (성공)"
+        $lblSessionStatus.ForeColor = [System.Drawing.Color]::Green
+        $statusLabel.Text = "로그인 성공!"
+        Load-Products
+    } else {
+        $lblSessionStatus.Text = "세션 상태: 로그인 실패"
+        $lblSessionStatus.ForeColor = [System.Drawing.Color]::Red
+        [System.Windows.Forms.MessageBox]::Show("로그인에 실패했습니다. 계정 정보를 확인하세요.", "오류", "OK", "Error")
     }
+})
 
-    if ($pyExitCode -ne 0) {
-        Write-Host ""
-        Write-Host "=================================================" -ForegroundColor Red
-        Write-Host "[!] 로그인 스크립트 실행에 실패했습니다." -ForegroundColor Yellow
-        Write-Host "=================================================" -ForegroundColor Red
+$btnClearCookie.add_Click({
+    $confirm = [System.Windows.Forms.MessageBox]::Show("저장된 로그인 쿠키를 삭제할까요?", "쿠키 삭제", "YesNo", "Question")
+    if ($confirm -ne "Yes") { return }
+    Remove-Item $COOKIE_FILE -Force -ErrorAction SilentlyContinue
+    Clear-SessionLists
+    $lblSessionStatus.Text = "세션 상태: 쿠키 없음"
+    $lblSessionStatus.ForeColor = [System.Drawing.Color]::Red
+    $statusLabel.Text = "쿠키를 삭제했습니다. 다시 로그인하세요."
+})
 
-        Remove-Item $COOKIE_FILE -Force -ErrorAction SilentlyContinue
-        continue
-    }
-
-    if (-not (Test-Path $COOKIE_FILE)) {
-        Write-Host ""
-        Write-Host "=================================================" -ForegroundColor Red
-        Write-Host "[!] cookies.txt 파일이 생성되지 않았습니다." -ForegroundColor Yellow
-        Write-Host "=================================================" -ForegroundColor Red
-        continue
-    }
-
-    if (-not (Test-RuckusLoginCookie -CookiePath $COOKIE_FILE)) {
-        Write-Host ""
-        Write-Host "=================================================" -ForegroundColor Red
-        Write-Host "[-] 로그인에 실패했습니다. 다시 시도하세요." -ForegroundColor Red
-        Write-Host "=================================================" -ForegroundColor Red
-
-        Remove-Item $COOKIE_FILE -Force -ErrorAction SilentlyContinue
-        continue
-    }
-
-    $NeedLogin = $false
-
-    Write-Host ""
-    Write-Host "=================================================" -ForegroundColor Green
-    Write-Host "[+] 로그인에 성공했습니다!" -ForegroundColor Green
-    Write-Host "[+] '$TargetCookieName' 인증 쿠키를 확인했습니다." -ForegroundColor Green
-    Write-Host "=================================================" -ForegroundColor Green
-}
-
-
-# -----------------------------------------------------------------
-:ProductLoop while ($true) {
-
-    # -----------------------------------------------------------------
-    # [단계 2] 제품 카테고리 동적 파싱
-    # -----------------------------------------------------------------
-    Write-Host ""
-    Write-Host "[2/5] Ruckus 제품 카테고리 동적 파싱 중..." -ForegroundColor Yellow
-
-    $softwareHtml = & curl.exe -k -s -b "$COOKIE_FILE" `
-      -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" `
-      "$BASE_URL/software" | Out-String
-
+function Load-Products {
+    $statusLabel.Text = "제품 카테고리 로딩 중..."
+    $cmbProd.Items.Clear()
+    $cmbVer.Items.Clear()
+    $listView.Items.Clear()
+    $mainForm.Refresh()
+    $softwareHtml = & curl.exe -k -s --connect-timeout 15 --max-time 30 -b "$COOKIE_FILE" -H "User-Agent: $UA" "$BASE_URL/software" | Out-String
     $optGroupMatches = [regex]::Matches($softwareHtml, '(?s)<optgroup label="([^"]+)">\s*(.*?)\s*</optgroup>')
-
-    $allowedGroups = @(
-        "RUCKUS Indoor APs",
-        "RUCKUS Outdoor APs",
-        "RUCKUS ICX Switches",
-        "Virtual SmartZone (vSZ)",
-        "RUCKUS Unleashed"
-    )
-
-    $productList = @()
-    $pCount = 1
-
+    $allowedGroups = @("RUCKUS Indoor APs", "RUCKUS Outdoor APs", "RUCKUS ICX Switches", "Virtual SmartZone (vSZ)", "RUCKUS Unleashed")
+    $script:ProductDataList = @()
     foreach ($group in $optGroupMatches) {
         $groupLabel = $group.Groups[1].Value.Trim()
         $groupContent = $group.Groups[2].Value
-
         $isNormalGroup = $allowedGroups -contains $groupLabel
         $isEolGroup    = $groupLabel -eq "EOL RUCKUS Products"
-
         if ($isNormalGroup -or $isEolGroup) {
             $optionMatches = [regex]::Matches($groupContent, '<option value="(\d+)">([^<]+)</option>')
-
             foreach ($opt in $optionMatches) {
                 $val  = $opt.Groups[1].Value.Trim()
                 $name = $opt.Groups[2].Value.Trim()
-
                 if ($isEolGroup -and ($name -notmatch '(?i)(Ruckus|SmartZone|ZoneDirector)')) { continue }
                 if ($name -match '^zzz') { continue }
-
-                $productList += [PSCustomObject]@{
-                    Index = $pCount
-                    Group = $groupLabel
-                    Id    = $val
-                    Name  = $name
-                }
-                $pCount++
+                $pObj = [PSCustomObject]@{ Group = $groupLabel; Id = $val; Name = $name }
+                $script:ProductDataList += $pObj
+                [void]$cmbProd.Items.Add("[$groupLabel] $name")
             }
         }
     }
-
-    if ($productList.Count -eq 0) {
-        Write-Host "[-] 제품 목록을 동적으로 가져오지 못했습니다." -ForegroundColor Red
-        exit 1
+    if ($cmbProd.Items.Count -gt 0) {
+        $cmbProd.SelectedIndex = 0
+        $statusLabel.Text = "제품 목록 ($($cmbProd.Items.Count)개) 수집 완료."
+    } else {
+        $statusLabel.Text = "제품 목록을 불러오지 못했습니다."
     }
+}
 
-    Write-Host ""
-    Write-Host "----------------------------------------------------------------------------" -ForegroundColor Gray
-    Write-Host ("{0,-4} | {1,-24} | {2}" -f "번호", "카테고리 (Group)", "제품명 (Product Name)") -ForegroundColor Cyan
-    Write-Host "----------------------------------------------------------------------------" -ForegroundColor Gray
-
-    foreach ($p in $productList) {
-        Write-Host ("{0,4}) | {1,-24} | {2}" -f $p.Index, $p.Group, $p.Name)
+$cmbProd.add_SelectedIndexChanged({
+    if ($cmbProd.SelectedIndex -lt 0) { return }
+    $selectedProd = $script:ProductDataList[$cmbProd.SelectedIndex]
+    $lblSelectedInfo.Text = "선택된 제품 ID: $($selectedProd.Id) | 카테고리: $($selectedProd.Group)"
+    $statusLabel.Text = "지원 버전 파싱 중..."
+    $cmbVer.Items.Clear()
+    $mainForm.Refresh()
+    $filterUrl = "$BASE_URL/products/$($selectedProd.Id)/filtered_products?type=software"
+    $filterHtml = & curl.exe -k -s --connect-timeout 15 --max-time 30 -b "$COOKIE_FILE" -H "User-Agent: $UA" "$filterUrl" | Out-String
+    [void]$cmbVer.Items.Add("ALL (전체 버전)")
+    if ($filterHtml -match "(?s)<div\s+id=['""]product_software_version['""]\s*>(.*?)</div>") {
+        $versionDivContent = $Matches[1]
+        $optionMatches = [regex]::Matches($versionDivContent, '<option\s+value=["'']([^"'']*)["'']>([^<]+)</option>')
+        foreach ($om in $optionMatches) {
+            $vVal  = $om.Groups[1].Value.Trim()
+            $vText = $om.Groups[2].Value.Trim()
+            if ($vVal -ne "" -and $vText -notmatch "Choose A Version") { [void]$cmbVer.Items.Add($vVal) }
+        }
     }
+    $cmbVer.SelectedIndex = 0
+    $statusLabel.Text = "버전 파싱 완료."
+})
 
-    Write-Host "----------------------------------------------------------------------------" -ForegroundColor Gray
-    Write-Host " 0) 종료"
-    Write-Host ""
+$btnFetchFiles.add_Click({
+    if ($cmbProd.SelectedIndex -lt 0) { return }
+    $selectedProd = $script:ProductDataList[$cmbProd.SelectedIndex]
+    $cleanProductName = $selectedProd.Name -replace '(?i)^(Ruckus|ZoneFlex|SmartZone)\s+', '' -replace '\s+', '_'
+    $isAllVersion = ($cmbVer.SelectedIndex -le 0)
+    
+    $statusLabel.Text = "소프트웨어 항목 분석 중... (버전별 일괄 조회)"
+    $listView.Items.Clear()
+    $txtSearch.Text = ""
+    $mainForm.Refresh()
 
-    $pChoice = Read-Host "대상 제품 선택 번호"
-    if ([string]::IsNullOrWhiteSpace($pChoice)) {
-        Write-Host "[-] 다시 입력해주세요." -ForegroundColor Red
-        continue
-    }
-    if ($pChoice -eq "0") { exit 0 }
+    $subUrls = @()
 
-    $selectedProduct = $null
-    if ($pChoice -match '^\d+$') {
-        $selectedProduct = $productList | Where-Object { $_.Index -eq [int]$pChoice }
-    }
-    if (-not $selectedProduct) {
-        Write-Host "[-] 올바른 번호를 선택해주세요. 다시 입력해주세요." -ForegroundColor Red
-        continue
-    }
+    if ($isAllVersion) {
+        $targetVersions = @()
+        for ($i = 1; $i -lt $cmbVer.Items.Count; $i++) {
+            $targetVersions += $cmbVer.Items[$i].ToString()
+        }
 
-    $cleanProductName = $selectedProduct.Name -replace '(?i)^(Ruckus|ZoneFlex|SmartZone)\s+', '' -replace '\s+', '_'
-    Write-Host "[+] 선택된 제품: [$($selectedProduct.Group)] $($selectedProduct.Name) (ID: $($selectedProduct.Id))" -ForegroundColor Green
+        foreach ($ver in $targetVersions) {
+            $versionParam = "?version=$ver&type=software"
+            $targetSoftwareListUrl = "$BASE_URL/products/$($selectedProd.Id)/filtered_products$versionParam"
 
-    # -----------------------------------------------------------------
-    :VersionLoop while ($true) {
+            $swListHtml = & curl.exe -k -s --connect-timeout 15 --max-time 30 -b "$COOKIE_FILE" -H "User-Agent: $UA" "$targetSoftwareListUrl" | Out-String
+            $subLinkMatches = [regex]::Matches($swListHtml, 'href="(/software/(\d+-[^"]+))"')
 
-        # [단계 3] 지원 버전 목록 파싱
-        # -----------------------------------------------------------------
-        Write-Host ""
-        Write-Host "[3/5] 지원 펌웨어 버전 정보 수집 중..." -ForegroundColor Yellow
-
-        $filterUrl = "$BASE_URL/products/$($selectedProduct.Id)/filtered_products?type=software"
-        $filterHtml = & curl.exe -k -s -b "$COOKIE_FILE" `
-          -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" `
-          "$filterUrl" | Out-String
-
-        $versionList = @()
-
-        if ($filterHtml -match "(?s)<div\s+id=['""]product_software_version['""]\s*>(.*?)</div>") {
-            $versionDivContent = $Matches[1]
-            $optionMatches = [regex]::Matches($versionDivContent, '<option\s+value=["'']([^"'']*)["'']>([^<]+)</option>')
-            
-            $vCount = 1
-            foreach ($om in $optionMatches) {
-                $vVal  = $om.Groups[1].Value.Trim()
-                $vText = $om.Groups[2].Value.Trim()
-
-                if ($vVal -ne "" -and $vText -notmatch "Choose A Version") {
-                    $versionList += [PSCustomObject]@{
-                        Index   = $vCount
-                        Version = $vVal
-                    }
-                    $vCount++
+            foreach ($sm in $subLinkMatches) {
+                $fullSubUrl = "$BASE_URL" + $sm.Groups[1].Value
+                if ($subUrls -notcontains $fullSubUrl) {
+                    $subUrls += $fullSubUrl
                 }
             }
         }
-
-        $NoVersionMenu = $false
-        if ($versionList.Count -eq 0) {
-            Write-Host "[!] 지정 영역에서 버전을 찾지 못했습니다. 전체 조회를 진행합니다." -ForegroundColor Yellow
-            $selectedVersion = ""
-            $NoVersionMenu = $true
-        } else {
-            Write-Host "----------------------------------------------------------------------------" -ForegroundColor Gray
-            Write-Host " [ 파싱된 버전 목록 ]" -ForegroundColor Cyan
-            Write-Host "----------------------------------------------------------------------------" -ForegroundColor Gray
-            
-            foreach ($v in $versionList) {
-                Write-Host ("{0,3}) Version {1}" -f $v.Index, $v.Version)
-            }
-            
-            Write-Host "----------------------------------------------------------------------------" -ForegroundColor Gray
-            Write-Host " a) 모든 버전 선택 (전체 조회)"
-            Write-Host " b) 이전 메뉴로 돌아가기 (제품 재선택)"
-            Write-Host " 0) 종료"
-            Write-Host "----------------------------------------------------------------------------" -ForegroundColor Gray
-
-            $vChoice = Read-Host "버전 선택 번호"
-            if ([string]::IsNullOrWhiteSpace($vChoice)) {
-                Write-Host "[-] 다시 입력해주세요." -ForegroundColor Red
-                continue
-            }
-            if ($vChoice -eq "0") { exit 0 }
-            elseif ($vChoice -eq "b" -or $vChoice -eq "B") { continue ProductLoop }
-            elseif ($vChoice -eq "a" -or $vChoice -eq "A") { 
-                $selectedVersion = "" 
-            }
-            else {
-                $selectedObj = $null
-                if ($vChoice -match '^\d+$') {
-                    $selectedObj = $versionList | Where-Object { $_.Index -eq [int]$vChoice }
-                }
-                if ($selectedObj) {
-                    $selectedVersion = $selectedObj.Version
-                } else {
-                    Write-Host "[-] 잘못된 번호입니다. 다시 입력해주세요." -ForegroundColor Red
-                    continue
-                }
-            }
-        }
-
-        Write-Host "[+] 선택된 버전: $(if($selectedVersion){ $selectedVersion } else { 'ALL' })" -ForegroundColor Green
-
-        # -----------------------------------------------------------------
-        # [단계 4] 세부 소프트웨어 항목 파싱 (버전 변경 시 1회 파싱 후 캐싱)
-        # -----------------------------------------------------------------
-        Write-Host ""
-        Write-Host "[4/5] 각 세부 항목의 파일 이름 및 용량 분석 중..." -ForegroundColor Yellow
-
-        $versionParam = if ($selectedVersion) { "?version=$selectedVersion&type=software" } else { "?type=software" }
-        $targetSoftwareListUrl = "$BASE_URL/products/$($selectedProduct.Id)/filtered_products$versionParam"
-
-        $swListHtml = & curl.exe -k -s -b "$COOKIE_FILE" `
-          -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" `
-          "$targetSoftwareListUrl" | Out-String
-
+    } else {
+        $selectedVersion = $cmbVer.SelectedItem.ToString()
+        $versionParam = "?version=$selectedVersion&type=software"
+        $targetSoftwareListUrl = "$BASE_URL/products/$($selectedProd.Id)/filtered_products$versionParam"
+        
+        $swListHtml = & curl.exe -k -s --connect-timeout 15 --max-time 30 -b "$COOKIE_FILE" -H "User-Agent: $UA" "$targetSoftwareListUrl" | Out-String
         $subLinkMatches = [regex]::Matches($swListHtml, 'href="(/software/(\d+-[^"]+))"')
-        $subUrls = @()
-
+        
         foreach ($sm in $subLinkMatches) {
             $fullSubUrl = "$BASE_URL" + $sm.Groups[1].Value
-            if ($subUrls -notcontains $fullSubUrl) { $subUrls += $fullSubUrl }
+            if ($subUrls -notcontains $fullSubUrl) {
+                $subUrls += $fullSubUrl
+            }
         }
+    }
 
-        if ($subUrls.Count -eq 0) {
-            Write-Host "[-] 다운로드 가능한 소프트웨어 항목을 찾을 수 없습니다." -ForegroundColor Red
-            continue VersionLoop
+    $rawFileDataList = @(Get-FileDetailsParallel -Urls $subUrls -CleanName $cleanProductName)
+    $script:FileDataList = @()
+    foreach ($fObj in $rawFileDataList) {
+        if ($fObj.RealFileName -notmatch '(?i)Software\s*Link') {
+            $script:FileDataList += $fObj
         }
+    }
 
-        # 메모리에 유지될 파싱 결과 리스트
-        $cachedFileList = @()
-        $fCounter = 1
+    foreach ($fObj in $script:FileDataList) {
+        $item = New-Object System.Windows.Forms.ListViewItem($fObj.RealFileName)
+        [void]$item.SubItems.Add($fObj.FileSize)
+        [void]$item.SubItems.Add($fObj.SoftwareTitle)
+        $item.Checked = $false
+        [void]$listView.Items.Add($item)
+    }
+    $script:SelectAllState = $false
+    $statusLabel.Text = "총 $($script:FileDataList.Count)개 소프트웨어 항목 파싱 완료 (전체 버전 순회)."
+})
 
-        foreach ($pageUrl in $subUrls) {
-            $detailHtml = & curl.exe -k -s -b "$COOKIE_FILE" `
-              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" `
-              "$pageUrl" | Out-String
+$btnSelectAll.add_Click({
+    $script:SelectAllState = -not $script:SelectAllState
+    foreach ($item in $listView.Items) { $item.Checked = $script:SelectAllState }
+})
 
-            $softwareTitle = "N/A"
-            if ($detailHtml -match '(?is)<title[^>]*>\s*(.*?)\s*</title>') {
-                $fullTitle = [System.Net.WebUtility]::HtmlDecode($Matches[1])
-                $softwareTitle = (($fullTitle -split '\|')[0].Trim() -replace '\s+', ' ')
-            }
-
-            $realFileName = ""
-            if ($detailHtml -match '(?is)<dt>\s*File Name:\s*</dt>\s*<dd>\s*<a[^>]*>\s*([^<]+?)\s*</a>\s*</dd>') {
-                $realFileName = [System.Net.WebUtility]::HtmlDecode($Matches[1].Trim())
-            }
-            if (-not $realFileName) { $realFileName = [System.IO.Path]::GetFileName($pageUrl) }
-
-            if ($cleanProductName -and $realFileName -match '^\d+[\d\.]+\.bl7$') {
-                $realFileName = "${cleanProductName}_${realFileName}"
-            }
-
-            $fileSize = "N/A"
-            if ($detailHtml -match '(?is)<dt>\s*File Size:\s*</dt>\s*<dd>\s*([^<]+?)\s*</dd>') {
-                $fileSize = [System.Net.WebUtility]::HtmlDecode($Matches[1].Trim())
-            }
-
-            $cachedFileList += [PSCustomObject]@{
-                Index         = $fCounter
-                PageUrl       = $pageUrl
-                RealFileName  = $realFileName
-                SoftwareTitle = $softwareTitle
-                FileSize      = $fileSize
-            }
-            $fCounter++
+$btnStartDownload.add_Click({
+    $selectedFiles = @()
+    for ($i = 0; $i -lt $listView.Items.Count; $i++) {
+        if ($listView.Items[$i].Checked) {
+            $currFileName = $listView.Items[$i].Text
+            $matchedFile = $script:FileDataList | Where-Object { $_.RealFileName -eq $currFileName } | Select-Object -First 1
+            if ($matchedFile) { $selectedFiles += $matchedFile }
         }
-
-        # -----------------------------------------------------------------
-        :FileLoop while ($true) {
-
-            # 캐시된 파일 목록 사용
-            $fileList = $cachedFileList
-
-            Write-Host ""
-            Write-Host "----------------------------------------------------------------------------------------------------" -ForegroundColor Gray
-            Write-Host ("{0,-6} | {1,-45} | {2,-15}" -f "번호", "파일 이름 (File Name)", "용량 (Size)") -ForegroundColor Cyan
-            Write-Host "----------------------------------------------------------------------------------------------------" -ForegroundColor Gray
-
-            foreach ($f in $fileList) {
-                Write-Host ("{0,4}) | {1,-45} | {2,-15}" -f $f.Index, $f.RealFileName, $f.FileSize)
-                Write-Host ("     └─ " + $f.SoftwareTitle) -ForegroundColor DarkGray
-                Write-Host ""
-            }
-
-            Write-Host "----------------------------------------------------------------------------------------------------" -ForegroundColor Gray
-            Write-Host "  a) 전체 파일 모두 선택 ($($fileList.Count)개)"
-            if ($NoVersionMenu) {
-                Write-Host "  b) 이전 메뉴로 돌아가기 (제품 재선택)"
-            } else {
-                Write-Host "  b) 이전 메뉴로 돌아가기 (버전 재선택)"
-            }
-            Write-Host "  0) 종료"
-            Write-Host "----------------------------------------------------------------------------------------------------" -ForegroundColor Gray
-
-            $fChoice = Read-Host "다운로드할 파일 번호 선택 (예: 1, 3 또는 1-5)"
-
-            $selectedFiles = @()
-
-            if ([string]::IsNullOrWhiteSpace($fChoice)) {
-                Write-Host "[-] 번호를 입력해주세요. 다시 입력해주세요." -ForegroundColor Red
-                continue FileLoop
-            }
-            if ($fChoice -eq "0") { exit 0 }
-            elseif ($fChoice -eq "b" -or $fChoice -eq "B") {
-                # 버전 메뉴가 없었던 경우(EOL 등) → 제품 선택으로 바로 복귀
-                # 버전 메뉴가 있었던 경우 → 버전 선택으로 복귀
-                if ($NoVersionMenu) {
-                    continue ProductLoop
-                } else {
-                    continue VersionLoop
-                }
-            }
-            elseif ($fChoice -eq "a" -or $fChoice -eq "A") {
-                $selectedFiles = $fileList
-            } else {
-                $selectedIndices = [System.Collections.Generic.List[int]]::new()
-                $tokens = $fChoice -split '[\s,]+'
-
-                foreach ($token in $tokens) {
-                    if ($token -match '^(\d+)-(\d+)$') {
-                        for ($n = [int]$Matches[1]; $n -le [int]$Matches[2]; $n++) { $selectedIndices.Add($n) }
-                    } elseif ($token -match '^\d+$') {
-                        $selectedIndices.Add([int]$token)
-                    }
-                }
-
-                foreach ($num in ($selectedIndices | Select-Object -Unique | Sort-Object)) {
-                    if ($num -ge 1 -and $num -le $fileList.Count) { $selectedFiles += $fileList[$num - 1] }
-                }
-            }
-
-            if ($selectedFiles.Count -eq 0) {
-                Write-Host "[-] 선택된 파일이 없습니다." -ForegroundColor Red
-                continue FileLoop
-            }
-
-            # -----------------------------------------------------------------
-            # [단계 5] 동시 최대 3개 병렬 다운로드
-            # -----------------------------------------------------------------
-            Write-Host ""
-            Write-Host "[5/5] 다운로드 실행 중 (총 $($selectedFiles.Count)개 파일 / 최대 3개 동시)..." -ForegroundColor Yellow
-
-            $MaxConcurrent = 3
-            $RunspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxConcurrent)
-            $RunspacePool.Open()
-
-            $Jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
-            $script:ActiveProcIds = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
-            $CancelState = [hashtable]::Synchronized(@{ Cancelled = $false })
-
-            # 스레드별 다운로드 수행 블록
-            $DownloadScriptBlock = {
-                param($fileItem, $COOKIE_FILE, $cleanProductName, $StatusData, $ActiveProcIds, $CancelState)
-
-                if ($CancelState.Cancelled) { $StatusData.Status = "중지됨"; return }
-
-                $pageUrl  = $fileItem.PageUrl
-                $uaHeader = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                $eulaQuery = "utf8=%E2%9C%93&tc_form%5Bagreement%5D=I+%22Understand+and+Agree%22&commit=Download"
-
-                # 1. 페이지 요청 및 EULA 엔드포인트 도출
-                $pageHtml = & curl.exe -k -s -b "$COOKIE_FILE" -H "User-Agent: $uaHeader" "$pageUrl" | Out-String
-
-                $downloadEndpointUrl = $null
-                if ($pageHtml -match 'action="(/software_downloads/[^"]+)"') {
-                    $downloadEndpointUrl = "https://support.ruckuswireless.com" + $Matches[1] + "?$eulaQuery"
-                } elseif ($pageHtml -match 'action="(/documents_downloads/[^"]+)"') {
-                    $downloadEndpointUrl = "https://support.ruckuswireless.com" + $Matches[1] + "?$eulaQuery"
-                } else {
-                    $downloadEndpointUrl = ($pageUrl -replace '/software/', '/software_downloads/') + "?$eulaQuery"
-                }
-
-                # 2. 약관 동의 제출 및 최종 S3 direct URL 추출 (Location 정보 분석)
-                $headRaw = & curl.exe -k -s -I -b "$COOKIE_FILE" -H "User-Agent: $uaHeader" -H "Referer: $pageUrl" "$downloadEndpointUrl" | Out-String
-
-                $finalDirectUrl = $downloadEndpointUrl
-                if ($headRaw -match '(?i)Location:\s*([^\r\n]+)') {
-                    $loc = $Matches[1].Trim()
-                    if ($loc -match '^https?://') {
-                        $finalDirectUrl = $loc
-                    } else {
-                        $finalDirectUrl = "https://support.ruckuswireless.com" + $loc
-                    }
-                }
-
-                # Location 헤더 URL 또는 Content-Disposition 헤더에서 실제 원본 파일명 추출
-                $extractedFileName = $null
-                if ($headRaw -match '(?i)Content-Disposition:.*filename="?([^";\r\n]+)"?') {
-                    $extractedFileName = $Matches[1].Trim()
-                } elseif ($finalDirectUrl) {
-                    $cleanUri = ($finalDirectUrl -split '\?')[0]
-                    $urlFile = [System.IO.Path]::GetFileName($cleanUri)
-                    if ($urlFile -match '^\d+-(.+)$') { 
-                        $extractedFileName = $Matches[1] 
-                    } elseif ($urlFile) { 
-                        $extractedFileName = $urlFile 
-                    }
-                }
-
-                # 저장 파일명 결정 (말줄임표가 포함되어 있거나 비어있는 경우 추출한 원본 파일명 적용)
-                $saveFileName = $fileItem.RealFileName
-                if (($saveFileName -match '\.{3,}$' -or [string]::IsNullOrWhiteSpace($saveFileName)) -and $extractedFileName) {
-                    $saveFileName = $extractedFileName
-                }
-
-                $StatusData.FileName = $saveFileName
-                $StatusData.Percent  = 0
-                $StatusData.Status   = "다운로드 준비 중..."
-
-                # curl 실행
-                $psi = New-Object System.Diagnostics.ProcessStartInfo
-                $psi.FileName = "curl.exe"
-                $psi.Arguments = "-k -L -C - --retry 5 --retry-delay 3 -b `"$COOKIE_FILE`" -c `"$COOKIE_FILE`" -H `"User-Agent: $uaHeader`" -H `"Referer: $pageUrl`" -o `"$saveFileName`" `"$finalDirectUrl`""
-                $psi.UseShellExecute = $false
-                $psi.RedirectStandardError = $true
-                $psi.CreateNoWindow = $true
-
-                $process = $null
-                $curlExitCode = -1
-
-                try {
-                    $process = [System.Diagnostics.Process]::Start($psi)
-                    [void]$ActiveProcIds.Add($process.Id)
-
-                    while (-not $process.HasExited) {
-                        if ($CancelState.Cancelled) {
-                            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-                            break
-                        }
-                        $line = $process.StandardError.ReadLine()
-                        if ($line) {
-                            $tokens = (-split $line.Trim())
-                            if ($tokens.Count -ge 4 -and $tokens[0] -match '^\d+$') {
-                                $pct = [int]$tokens[0]
-                                $totalSize = $tokens[1]
-                                $dlSize    = $tokens[3]
-
-                                if ($pct -le 100) {
-                                    $StatusData.Percent = $pct
-                                    if ($totalSize -and $dlSize) {
-                                        $StatusData.SizeInfo = "$dlSize / $totalSize"
-                                    }
-                                    $StatusData.Status = "다운로드 중... ($pct%)"
-                                }
-                            }
+    }
+    if ($selectedFiles.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("다운로드할 파일을 선택하세요.", "알림", "OK", "Warning")
+        return
+    }
+    $MaxConcurrent = 3
+    $RunspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxConcurrent)
+    $RunspacePool.Open()
+    $Jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $ActiveProcIds = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $CancelState = [hashtable]::Synchronized(@{ Cancelled = $false })
+    $DownloadScriptBlock = {
+        param($fileItem, $COOKIE_FILE, $StatusData, $ActiveProcIds, $CancelState)
+        if ($CancelState.Cancelled) { $StatusData.Status = "중지됨"; return }
+        $pageUrl  = $fileItem.PageUrl
+        $uaHeader = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        $eulaQuery = "utf8=%E2%9C%93&tc_form%5Bagreement%5D=I+%22Understand+and+Agree%22&commit=Download"
+        $pageHtml = & curl.exe -k -s -b "$COOKIE_FILE" -H "User-Agent: $uaHeader" "$pageUrl" | Out-String
+        $downloadEndpointUrl = $null
+        if ($pageHtml -match 'action="(/software_downloads/[^"]+)"') {
+            $downloadEndpointUrl = "https://support.ruckuswireless.com" + $Matches[1] + "?$eulaQuery"
+        } elseif ($pageHtml -match 'action="(/documents_downloads/[^"]+)"') {
+            $downloadEndpointUrl = "https://support.ruckuswireless.com" + $Matches[1] + "?$eulaQuery"
+        } else {
+            $downloadEndpointUrl = ($pageUrl -replace '/software/', '/software_downloads/') + "?$eulaQuery"
+        }
+        $headRaw = & curl.exe -k -s -I -b "$COOKIE_FILE" -H "User-Agent: $uaHeader" -H "Referer: $pageUrl" "$downloadEndpointUrl" | Out-String
+        $finalDirectUrl = $downloadEndpointUrl
+        if ($headRaw -match '(?i)Location:\s*([^\r\n]+)') {
+            $loc = $Matches[1].Trim()
+            $finalDirectUrl = if ($loc -match '^https?://') { $loc } else { "https://support.ruckuswireless.com" + $loc }
+        }
+        $saveFileName = $fileItem.RealFileName
+        $StatusData.FileName = $saveFileName
+        $StatusData.Status   = "다운로드 중..."
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "curl.exe"
+        $psi.Arguments = "-k -L -C - --retry 5 --retry-delay 3 -b `"$COOKIE_FILE`" -c `"$COOKIE_FILE`" -H `"User-Agent: $uaHeader`" -H `"Referer: $pageUrl`" -o `"$saveFileName`" `"$finalDirectUrl`""
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $process = $null
+        $curlExitCode = -1
+        try {
+            $process = [System.Diagnostics.Process]::Start($psi)
+            [void]$ActiveProcIds.Add($process.Id)
+            while (-not $process.HasExited) {
+                if ($CancelState.Cancelled) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; break }
+                $line = $process.StandardError.ReadLine()
+                if ($line) {
+                    $tokens = $line.Trim() -split '\s+'
+                    if ($tokens.Count -ge 4 -and $tokens[0] -match '^\d+$') {
+                        $pct = [int]$tokens[0]
+                        if ($pct -le 100) {
+                            $StatusData.Percent = $pct
+                            $StatusData.SizeInfo = "$($tokens[3]) / $($tokens[1])"
                         }
                     }
-                    if ($process.HasExited) {
-                        $curlExitCode = $process.ExitCode
-                    }
-                } catch {
-                    $StatusData.Status = "중지됨"
-                } finally {
-                    if ($process) {
-                        try {
-                            if (-not $process.HasExited) {
-                                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-                            }
-                            $process.WaitForExit()
-                        } catch {}
-
-                        try { [void]$ActiveProcIds.Remove($process.Id) } catch {}
-                        try { $process.Dispose() } catch {}
-                    }
-                }
-
-                if ($CancelState.Cancelled) { $StatusData.Status = "중지됨"; return }
-
-                if (Test-Path $saveFileName) {
-                    $fileBytes = (Get-Item $saveFileName).Length
-
-                    if ($fileBytes -lt 50000) {
-                        $headContent = Get-Content $saveFileName -Head 10 -ErrorAction SilentlyContinue | Out-String
-                        if ($headContent -match '(?i)(<html|login|doctype)') {
-                            Remove-Item $saveFileName -Force -ErrorAction SilentlyContinue
-                            $StatusData.Status = "중지/실패"
-                            return
-                        }
-                    }
-
-                    if ($fileBytes -gt 0 -and ($curlExitCode -eq 0 -or $curlExitCode -eq 33 -or $curlExitCode -eq 18 -or $StatusData.Percent -ge 99)) {
-                        $StatusData.Percent = 100
-                        $StatusData.Status  = "완료"
-                        $StatusData.SizeInfo = "{0:N2} MB" -f ($fileBytes / 1MB)
-                        return
-                    }
-                }
-
-                $StatusData.Status = "중지/실패"
-            }
-
-            # 공유 상태 테이블 정의
-            $JobStatuses = [System.Collections.Generic.List[hashtable]]::new()
-
-            foreach ($fileItem in $selectedFiles) {
-                $syncHash = [hashtable]::Synchronized(@{
-                    FileName = $fileItem.RealFileName
-                    FileSize = $fileItem.FileSize
-                    SizeInfo = "0 B / " + $fileItem.FileSize
-                    Percent  = 0
-                    Status   = "대기 중..."
-                })
-                $JobStatuses.Add($syncHash)
-
-                $PowerShell = [powershell]::Create()
-                $PowerShell.RunspacePool = $RunspacePool
-                [void]$PowerShell.AddScript($DownloadScriptBlock).AddArgument($fileItem).AddArgument($COOKIE_FILE).AddArgument($cleanProductName).AddArgument($syncHash).AddArgument($script:ActiveProcIds).AddArgument($CancelState)
-
-                $JobObj = [PSCustomObject]@{
-                    Pipe   = $PowerShell
-                    Result = $PowerShell.BeginInvoke()
-                    Status = $syncHash
-                }
-                $Jobs.Add($JobObj)
-            }
-
-            # GUI 진행 상황 창 (Form) 구성
-            $form = New-Object System.Windows.Forms.Form
-            $form.Text = "Ruckus Firmware 병렬 다운로드 진행상황"
-            $form.Width = 720
-            $form.Height = 85 + ($Jobs.Count * 65)
-            $form.StartPosition = "CenterScreen"
-            $form.FormBorderStyle = "FixedDialog"
-            $form.MaximizeBox = $false
-
-            $script:IsUserCancelled = $false
-            $script:AllDone = $false
-
-            $form.add_FormClosing({
-                param($sender, $e)
-                try {
-                    if (-not $script:AllDone) {
-                        $script:IsUserCancelled = $true
-                        $CancelState.Cancelled = $true
-
-                        $pList = @($script:ActiveProcIds)
-                        foreach ($pId in $pList) {
-                            if ($pId) {
-                                Stop-Process -Id $pId -Force -ErrorAction SilentlyContinue
-                            }
-                        }
-                    }
-                } catch {}
-            })
-
-            $uiElements = @()
-            $topPos = 15
-
-            for ($i = 0; $i -lt $Jobs.Count; $i++) {
-                $lbl = New-Object System.Windows.Forms.Label
-                $lbl.Left = 20; $lbl.Top = $topPos; $lbl.Width = 660; $lbl.Height = 18
-                $lbl.Text = "[$($i+1)/$($Jobs.Count)] 대기 중: $($Jobs[$i].Status.FileName) ($($Jobs[$i].Status.FileSize))"
-                $form.Controls.Add($lbl)
-
-                $pb = New-Object System.Windows.Forms.ProgressBar
-                $pb.Left = 20; $pb.Top = $topPos + 20; $pb.Width = 660; $pb.Height = 20
-                $pb.Minimum = 0; $pb.Maximum = 100; $pb.Value = 0
-                $form.Controls.Add($pb)
-
-                $uiElements += [PSCustomObject]@{ Label = $lbl; ProgressBar = $pb }
-                $topPos += 60
-            }
-
-            # UI 실시간 업데이트 타이머
-            $timer = New-Object System.Windows.Forms.Timer
-            $timer.Interval = 200
-            $timer.add_Tick({
-                $allFinished = $true
-                for ($i = 0; $i -lt $Jobs.Count; $i++) {
-                    $st = $Jobs[$i].Status
-                    $ui = $uiElements[$i]
-
-                    $ui.ProgressBar.Value = [math]::Min(100, [math]::Max(0, $st.Percent))
-                    
-                    $sizeStr = if ($st.SizeInfo) { " [ " + $st.SizeInfo + " ]" } else { "" }
-                    $ui.Label.Text = "[$($i+1)/$($Jobs.Count)] [$($st.Status)]$sizeStr $($st.FileName)"
-
-                    if (-not $Jobs[$i].Result.IsCompleted) {
-                        $allFinished = $false
-                    }
-                }
-
-                if ($allFinished) {
-                    $script:AllDone = $true
-                    $timer.Stop()
-                    $form.Close()
-                }
-            })
-
-            $timer.Start()
-            [void]$form.ShowDialog()
-
-            # 스레드 파이프라인 정리
-            foreach ($job in $Jobs) {
-                try {
-                    if ($script:IsUserCancelled) {
-                        $CancelState.Cancelled = $true
-                    }
-                    [void]$job.Pipe.EndInvoke($job.Result)
-                } catch {}
-                finally {
-                    try { $job.Pipe.Dispose() } catch {}
                 }
             }
-
-            if ($script:IsUserCancelled) {
-                foreach ($pId in @($script:ActiveProcIds)) {
-                    try { Stop-Process -Id $pId -Force -ErrorAction SilentlyContinue } catch {}
-                    try { Wait-Process -Id $pId -Timeout 5 -ErrorAction SilentlyContinue } catch {}
-                }
-                $script:ActiveProcIds.Clear()
-
-                foreach ($job in $Jobs) {
-                    $partialFile = $job.Status.FileName
-                    if ($partialFile -and $job.Status.Status -ne "완료" -and (Test-Path -LiteralPath $partialFile)) {
-                        Write-Host "  [~] 중단 파일 유지(이어받기 가능): $partialFile" -ForegroundColor Cyan
-                    }
-                }
+            if ($process.HasExited) { $curlExitCode = $process.ExitCode }
+        } catch { $StatusData.Status = "오류" }
+        finally {
+            if ($process) {
+                try { if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } } catch {}
+                try { [void]$ActiveProcIds.Remove($process.Id) } catch {}
+                try { $process.Dispose() } catch {}
             }
-
-            $RunspacePool.Close()
-            $RunspacePool.Dispose()
-
-            # 메시지 및 이동
-            if ($script:IsUserCancelled) {
-                Write-Host "  [!] 사용자에 의해 다운로드가 중지되었습니다. 중단된 파일은 유지되며 같은 파일을 다시 선택하면 이어받습니다." -ForegroundColor Yellow
-            } else {
-                foreach ($job in $Jobs) {
-                    if ($job.Status.Status -eq "완료") {
-                        Write-Host "  [+] 완료: $($job.Status.FileName) ($($job.Status.SizeInfo))" -ForegroundColor Green
-                    } else {
-                        Write-Host "  [-] 중지/실패: $($job.Status.FileName)" -ForegroundColor Red
-                    }
-                }
-                Write-Host ""
-                Write-Host "[+] 다운로드 작업이 완료되었습니다." -ForegroundColor Green
+        }
+        if ($CancelState.Cancelled) { $StatusData.Status = "중지됨"; return }
+        if (Test-Path $saveFileName) {
+            $fileBytes = (Get-Item $saveFileName).Length
+            if ($fileBytes -gt 0 -and ($curlExitCode -eq 0 -or $curlExitCode -eq 33 -or $curlExitCode -eq 18 -or $StatusData.Percent -ge 99)) {
+                $StatusData.Percent = 100
+                $StatusData.Status  = "완료"
+                $StatusData.SizeInfo = "{0:N2} MB" -f ($fileBytes / 1MB)
+                return
             }
+        }
+        $StatusData.Status = "실패"
+    }
 
-            Write-Host ""
-            while ($true) {
-                $continueChoice = Read-Host "다른 파일도 다운로드하시겠습니까? (y/n)"
-                if ($continueChoice -eq "y" -or $continueChoice -eq "Y") {
-                    continue FileLoop
-                }
-                elseif ($continueChoice -eq "n" -or $continueChoice -eq "N") {
-                    break ProductLoop
-                }
-                else {
-                    Write-Host "[-] 다시 입력해주세요. (y/n)" -ForegroundColor Red
-                }
-            }
-        } # FileLoop
-    } # VersionLoop
-} # ProductLoop
+    $progressForm = New-Object System.Windows.Forms.Form
+    $progressForm.Text = "다운로드 진행 상황"
+    $progressForm.Width = 720
+    $progressForm.Height = [Math]::Min(900, 100 + ($selectedFiles.Count * 65))
+    $progressForm.StartPosition = "CenterParent"
+    $progressForm.FormBorderStyle = "FixedDialog"
+    $progressForm.MaximizeBox = $false
+    $uiElements = @()
+    $topPos = 15
+    for ($i = 0; $i -lt $selectedFiles.Count; $i++) {
+        $fileItem = $selectedFiles[$i]
+        $syncHash = [hashtable]::Synchronized(@{
+            FileName = $fileItem.RealFileName
+            FileSize = $fileItem.FileSize
+            SizeInfo = "0 B / " + $fileItem.FileSize
+            Percent  = 0
+            Status   = "대기 중..."
+        })
+        $PowerShell = [powershell]::Create()
+        $PowerShell.RunspacePool = $RunspacePool
+        [void]$PowerShell.AddScript($DownloadScriptBlock).AddArgument($fileItem).AddArgument($COOKIE_FILE).AddArgument($syncHash).AddArgument($ActiveProcIds).AddArgument($CancelState)
+        $Jobs.Add([PSCustomObject]@{ Pipe = $PowerShell; Result = $PowerShell.BeginInvoke(); Status = $syncHash })
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Left = 20; $lbl.Top = $topPos; $lbl.Width = 660; $lbl.Height = 18
+        $lbl.Font = $fontLabel
+        $lbl.Text = "[$($i+1)/$($selectedFiles.Count)] 대기 중: $($fileItem.RealFileName)"
+        $progressForm.Controls.Add($lbl)
+        $pb = New-Object System.Windows.Forms.ProgressBar
+        $pb.Left = 20; $pb.Top = $topPos + 20; $pb.Width = 660; $pb.Height = 20
+        $pb.Minimum = 0; $pb.Maximum = 100; $pb.Value = 0
+        $progressForm.Controls.Add($pb)
+        $uiElements += [PSCustomObject]@{ Label = $lbl; ProgressBar = $pb }
+        $topPos += 60
+    }
+    $script:IsCancelled = $false
+    $script:AllDone = $false
+    $progressForm.add_FormClosing({
+        if (-not $script:AllDone) {
+            $script:IsCancelled = $true
+            $CancelState.Cancelled = $true
+            foreach ($procId in @($ActiveProcIds)) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }
+        }
+    })
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 200
+    $timer.add_Tick({
+        $finishedCount = 0
+        for ($i = 0; $i -lt $Jobs.Count; $i++) {
+            $st = $Jobs[$i].Status
+            $ui = $uiElements[$i]
+            $ui.ProgressBar.Value = [math]::Min(100, [math]::Max(0, $st.Percent))
+            $ui.Label.Text = "[$($i+1)/$($Jobs.Count)] [$($st.Status)] [$($st.SizeInfo)] $($st.FileName)"
+            if ($Jobs[$i].Result.IsCompleted) { $finishedCount++ }
+        }
+        if ($finishedCount -eq $Jobs.Count) {
+            $script:AllDone = $true
+            $timer.Stop()
+            $progressForm.Close()
+        }
+    })
+    $timer.Start()
+    [void]$progressForm.ShowDialog()
+    foreach ($job in $Jobs) {
+        try { [void]$job.Pipe.EndInvoke($job.Result) } catch {}
+        finally { try { $job.Pipe.Dispose() } catch {} }
+    }
+    $RunspacePool.Close(); $RunspacePool.Dispose()
+    if ($script:IsCancelled) {
+        [System.Windows.Forms.MessageBox]::Show("사용자에 의해 다운로드가 중단되었습니다.", "알림", "OK", "Information")
+    } else {
+        [System.Windows.Forms.MessageBox]::Show("선택한 모든 파일의 다운로드 작업이 완료되었습니다.", "완료", "OK", "Information")
+    }
+})
 
-Write-Host "[+] 프로그램을 종료합니다." -ForegroundColor Cyan
+$mainForm.add_Shown({
+    $statusLabel.Text = "파이썬 및 필수 패키지 환경 검사 중..."
+    $mainForm.Refresh()
+    $script:PyExePath = Test-PythonEnv
+    if (-not $script:PyExePath) {
+        [System.Windows.Forms.MessageBox]::Show("Python 환경 구성에 실패했습니다.", "오류", "OK", "Error")
+        $mainForm.Close()
+        return
+    }
+    if (Test-CookieValid) {
+        $lblSessionStatus.Text = "세션 상태: 유효함"
+        $lblSessionStatus.ForeColor = [System.Drawing.Color]::Green
+        Load-Products
+    } else {
+        $lblSessionStatus.Text = "세션 상태: 만료됨/없음"
+        $lblSessionStatus.ForeColor = [System.Drawing.Color]::Red
+        $statusLabel.Text = "계정 정보를 입력하고 로그인을 진행해주세요."
+    }
+})
+
+[void]$mainForm.ShowDialog()

@@ -44,7 +44,7 @@ echo [*] 최신 커밋 확인 완료.
 echo [*] 최신 커밋 SHA:
 echo     %COMMIT_SHA%
 
-set "UPDATE_URL=%GITHUB_RAW_BASE%/%COMMIT_SHA%/windows/%SCRIPT_NAME%"
+set "UPDATE_URL=%GITHUB_RAW_BASE%/%COMMIT_SHA%/windowss/%SCRIPT_NAME%"
 
 echo.
 echo [*] 최신 PS1 파일 다운로드 URL:
