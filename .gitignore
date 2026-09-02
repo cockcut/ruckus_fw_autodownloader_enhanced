@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
+
+# PyInstaller
+build/
+*.spec
+*.exe
+*.exe.new
+
+# App runtime / secrets
+cookies.txt
+access_token.txt
+*.token
+.update_sha
+_replace_exe.bat
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.bak
+*~
+
+# Local only
+.grok/
+windows_devel/
