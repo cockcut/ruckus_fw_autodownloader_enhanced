@@ -479,8 +479,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"Ruckus All Downloader {VERSION} (GUI)")
-        self.geometry("850x710")
-        self.minsize(850, 710)
+        self.geometry("850x760")
+        self.minsize(850, 760)
         self.resizable(False, False)
         self.configure(bg="#F0F0F0")
 
@@ -546,8 +546,29 @@ class App(tk.Tk):
         ])
         style.configure("Status.TLabel", background="#F0F0F0", font=("맑은 고딕", 9))
 
+        upd = tk.Frame(self, bg="#F0F0F0")
+        upd.place(x=15, y=8, width=820, height=30)
+        self._win_button(upd, "업데이트 확인", self.on_check_update).pack(side="left")
+        self.lbl_upd = tk.Label(upd, text="", bg="#F0F0F0", fg="#666666", font=("맑은 고딕", 9), anchor="w")
+        self.lbl_upd.pack(side="left", padx=10)
+        self.btn_apply_upd = tk.Button(
+            upd,
+            text="업데이트",
+            command=self._do_update,
+            bg="#d9534f",
+            activebackground="#c9302c",
+            fg="white",
+            activeforeground="white",
+            font=("맑은 고딕", 9, "bold"),
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=2,
+            cursor="hand2",
+        )
+
         g1 = ttk.LabelFrame(self, text=" 1. Ruckus 계정 세션 관리 ")
-        g1.place(x=15, y=10, width=805, height=75)
+        g1.place(x=15, y=44, width=805, height=75)
         ttk.Label(g1, text="Email:").place(x=15, y=28)
         self.ent_user = ttk.Entry(g1, width=24, font=("맑은 고딕", 9))
         self.ent_user.place(x=65, y=26, width=170, height=23)
@@ -562,7 +583,7 @@ class App(tk.Tk):
         self.lbl_session.place(x=640, y=28, width=155, height=20)
 
         g2 = ttk.LabelFrame(self, text=" 2. 제품 및 버전 선택 ")
-        g2.place(x=15, y=95, width=805, height=90)
+        g2.place(x=15, y=129, width=805, height=90)
         ttk.Label(g2, text="제품 선택:").place(x=15, y=28)
         self.cmb_prod = ttk.Combobox(g2, state="readonly", font=("맑은 고딕", 9))
         self.cmb_prod.place(x=85, y=25, width=320, height=23)
@@ -575,7 +596,7 @@ class App(tk.Tk):
         self.lbl_info.place(x=15, y=58, width=655, height=20)
 
         g3 = ttk.LabelFrame(self, text=" 3. 다운로드 가능 파일 목록 (검색 및 정렬 가능) ")
-        g3.place(x=15, y=195, width=805, height=450)
+        g3.place(x=15, y=229, width=805, height=456)
         ttk.Label(g3, text="결과 내 검색:").place(x=15, y=25)
         self.ent_search = ttk.Entry(g3, font=("맑은 고딕", 9))
         self.ent_search.place(x=95, y=23, width=695, height=23)
@@ -583,7 +604,7 @@ class App(tk.Tk):
 
         cols = ("filename", "size", "title")
         box = tk.Frame(g3, bg="white", highlightthickness=1, highlightbackground="#D0D0D0")
-        box.place(x=15, y=55, width=775, height=330)
+        box.place(x=15, y=55, width=775, height=310)
         self.tree = ttk.Treeview(
             box,
             columns=cols,
@@ -612,22 +633,19 @@ class App(tk.Tk):
         box.grid_rowconfigure(0, weight=1)
         box.grid_columnconfigure(0, weight=1)
 
-        self._win_button(g3, "전체 선택/해제", self.toggle_select_all).place(x=15, y=395, width=110, height=28)
+        self._win_button(g3, "전체 선택/해제", self.toggle_select_all).place(x=15, y=375, width=110, height=28)
         self._win_button(
             g3,
             "선택 파일 다운로드 실행 (최대 3개 병렬)",
             self.on_download,
             bg="LightSkyBlue",
             bold=True,
-        ).place(x=540, y=392, width=250, height=33)
+        ).place(x=540, y=372, width=250, height=33)
 
         self.status = tk.StringVar(value="준비 완료.")
         status_bar = tk.Frame(self, bg="#F0F0F0", relief="sunken", bd=1)
-        status_bar.place(x=0, y=648, width=850, height=32)
-        ttk.Label(status_bar, textvariable=self.status, style="Status.TLabel", anchor="w").pack(side="left", fill="x", expand=True, padx=8)
-        self.lbl_upd = tk.Label(status_bar, text="", bg="#F0F0F0", fg="#0044aa", font=("맑은 고딕", 8), anchor="e")
-        self.lbl_upd.pack(side="left", padx=6)
-        self._win_button(status_bar, "업데이트 확인", self.on_check_update).pack(side="right", padx=6, pady=2)
+        status_bar.place(x=0, y=700, width=850, height=24)
+        ttk.Label(status_bar, textvariable=self.status, style="Status.TLabel", anchor="w").pack(fill="x", padx=8)
 
     def set_session_label(self, text, ok=None):
         self.lbl_session["text"] = text
@@ -661,29 +679,36 @@ class App(tk.Tk):
 
     def _check_update_worker(self, prompt):
         frozen = bool(getattr(sys, "frozen", False))
-        info = gh_updater.check_update(APP_DIR, frozen=frozen, current_version=VERSION)
+        info = gh_updater.check_update(APP_DIR, frozen=frozen, current_version=VERSION, exe_path=sys.executable if frozen else "")
         self._update_info = info
         self.after(0, lambda: self._show_update(info, prompt))
+
+    def _set_apply_visible(self, show):
+        if not hasattr(self, "btn_apply_upd"):
+            return
+        if show:
+            if not self.btn_apply_upd.winfo_ismapped():
+                self.btn_apply_upd.pack(side="left")
+        else:
+            self.btn_apply_upd.pack_forget()
 
     def _show_update(self, info, prompt):
         if not info.get("ok"):
             self.lbl_upd["text"] = info.get("message") or "업데이트 확인 실패"
-            if prompt:
-                messagebox.showwarning("업데이트", info.get("message") or "확인 실패")
+            self._set_apply_visible(False)
             return
         if info.get("available"):
-            self.lbl_upd["text"] = f"새 버전 {info.get('remote_ver')}"
-            if messagebox.askyesno("업데이트", f"새 버전 {info.get('remote_ver')} 이(가) 있습니다.\n지금 업데이트할까요?"):
-                self._do_update()
+            self.lbl_upd["text"] = info.get("message") or "새 버전이 있습니다."
+            self._set_apply_visible(True)
         else:
-            self.lbl_upd["text"] = info.get("message") or "최신 버전"
-            if prompt:
-                messagebox.showinfo("업데이트", info.get("message") or "최신 버전입니다.")
+            self.lbl_upd["text"] = "최신 버전입니다."
+            self._set_apply_visible(False)
 
     def _do_update(self):
         info = getattr(self, "_update_info", None) or {}
         frozen = bool(getattr(sys, "frozen", False))
         self.lbl_upd["text"] = "업데이트 받는 중..."
+        self._set_apply_visible(False)
 
         def work():
             result = gh_updater.apply_update(
@@ -691,6 +716,7 @@ class App(tk.Tk):
                 frozen=frozen,
                 exe_path=sys.executable if frozen else "",
                 info=info,
+                expected_sha=info.get("remote") or "",
             )
             self.after(0, lambda: self._after_update(result, frozen))
 
@@ -699,20 +725,19 @@ class App(tk.Tk):
     def _after_update(self, result, frozen):
         if not result.get("ok"):
             self.lbl_upd["text"] = result.get("message") or "업데이트 실패"
-            messagebox.showerror("업데이트", result.get("message") or "실패")
+            self._set_apply_visible(True)
             return
-        self.lbl_upd["text"] = "업데이트 완료"
+        self.lbl_upd["text"] = result.get("message") or "업데이트 완료"
+        self._set_apply_visible(False)
         bat = result.get("replace_bat")
         if bat:
-            messagebox.showinfo("업데이트", result.get("message"))
             try:
                 gh_updater.launch_replace_bat(bat, APP_DIR)
             except Exception as exc:
-                messagebox.showerror("업데이트", str(exc))
+                self.lbl_upd["text"] = str(exc)
                 return
             self.destroy()
             return
-        messagebox.showinfo("업데이트", result.get("message") or "완료")
         self.destroy()
 
     def on_login(self):
