@@ -25,7 +25,6 @@ SOURCE_FILES = (
     "Ruckus_Unleashed_Downloader.py",
     "get_ruckus_cookie.py",
     "run_unleashed_downloader.bat",
-    "build_exe.bat",
     "python_uninstaller.bat",
     "ver.txt",
     "updater.py",

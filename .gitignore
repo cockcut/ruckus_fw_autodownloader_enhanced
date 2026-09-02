@@ -38,3 +38,6 @@ desktop.ini
 # Local only
 .grok/
 windows_devel/
+
+# Local build helper
+build_exe.bat
