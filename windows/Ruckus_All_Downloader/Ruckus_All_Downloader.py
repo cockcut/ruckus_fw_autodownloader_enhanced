@@ -14,6 +14,7 @@ import shutil
 import threading
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, date
 from html import unescape
 from pathlib import Path
 from urllib.parse import unquote
@@ -76,6 +77,44 @@ def load_cookie_module():
     sys.path.insert(0, str(app_path("get_ruckus_cookie.py").parent))
     import get_ruckus_cookie as cookie_mod  # noqa: WPS433
     return cookie_mod
+
+
+def check_cookie_status(path: Path = COOKIE_FILE) -> int:
+    """
+    반환 값:
+      0: 쿠키 없음 (파일 미존재 또는 읽기 실패)
+      1: 쿠키는 존재하나 생성/수정일이 오늘 날짜가 아니거나 만료됨
+      2: 오늘 생성되었고 유효함
+    """
+    if not path.exists():
+        return 0
+
+    # 파일 수정 시간이 오늘 날짜인지 확인
+    file_mtime = datetime.fromtimestamp(path.stat().st_mtime).date()
+    if file_mtime != date.today():
+        return 1
+
+    now = int(time.time())
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return 0
+
+    valid_cookie_found = False
+    for line in lines:
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7 and parts[5].strip() == "production_ruckus_support":
+            try:
+                exp = int(parts[4].strip() or "0")
+            except ValueError:
+                return 1
+            if exp > now:
+                valid_cookie_found = True
+                break
+
+    return 2 if valid_cookie_found else 1
 
 
 def cookie_valid(path: Path = COOKIE_FILE) -> bool:
@@ -662,14 +701,21 @@ class App(tk.Tk):
             load_cookie_module()
         except Exception as exc:
             messagebox.showerror("오류", f"get_ruckus_cookie.py 를 불러오지 못했습니다.\n{exc}")
-        if cookie_valid():
-            self.set_session_label("세션 상태: 유효함", True)
+            
+        status_code = check_cookie_status()
+        
+        if status_code == 2:
+            self.set_session_label("세션 : 유효함", True)
             self.load_products_async()
-        else:
-            self.set_session_label("세션 상태: 만료됨/없음", False)
+        elif status_code == 1:
+            self.set_session_label("세션 : 쿠키 삭제후 로그인", False)
+            self.status.set("쿠키가 만료되었습니다. 쿠키 삭제후 로그인을 다시 진행해주세요.")
+            self.lbl_info["text"] = "제품을 불러오려면 로그인이 필요합니다."
+        else:  # status_code == 0
+            self.set_session_label("세션 : 쿠키없음. 로그인", False)
             self.status.set("계정 정보를 입력하고 로그인을 진행해주세요.")
             self.lbl_info["text"] = "제품을 불러오려면 로그인이 필요합니다."
-
+            
     def _silent_update_check(self):
         threading.Thread(target=self._check_update_worker, args=(False,), daemon=True).start()
 
@@ -763,11 +809,11 @@ class App(tk.Tk):
 
     def _login_done(self, ok):
         if ok and cookie_valid():
-            self.set_session_label("세션 상태: 유효함 (성공)", True)
+            self.set_session_label("세션: 유효함 (성공)", True)
             self.status.set("로그인 성공!")
             self.load_products_async()
         else:
-            self.set_session_label("세션 상태: 로그인 실패", False)
+            self.set_session_label("세션: 로그인 실패", False)
             messagebox.showerror("오류", "로그인에 실패했습니다. 계정 정보를 확인하세요.")
 
     def on_clear_cookie(self):
@@ -786,7 +832,7 @@ class App(tk.Tk):
         self.cmb_prod.set("")
         self.cmb_ver.set("")
         self.refresh_list()
-        self.set_session_label("세션 상태: 쿠키 없음", False)
+        self.set_session_label("세션: 쿠키 없음", False)
         self.status.set("쿠키를 삭제했습니다. 다시 로그인하세요.")
         self.lbl_info["text"] = "제품을 불러오려면 로그인이 필요합니다."
 
