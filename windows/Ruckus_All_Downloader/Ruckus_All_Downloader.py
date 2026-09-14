@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from html import unescape
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin, urlparse
 
 import urllib3
 import requests
@@ -61,6 +61,23 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 
 COOKIE_FILE = APP_DIR / "cookies.txt"
+_ds_sib = Path(__file__).resolve().parent.parent / "datasheet"
+DS_SAVE_DIR = (_ds_sib if _ds_sib.is_dir() else APP_DIR) / "datasheet"
+
+
+def open_save_folder(path: Path):
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception as exc:
+        messagebox.showerror("오류", f"폴더를 열 수 없습니다.\n{path}\n{exc}")
+
 
 
 def app_path(name: str) -> Path:
@@ -644,6 +661,7 @@ class FirmwareApp(tk.Toplevel):
         box.grid_columnconfigure(0, weight=1)
 
         self._win_button(g3, "전체 선택/해제", self.toggle_select_all).place(x=15, y=435, width=110, height=28)
+        self._win_button(g3, "firmware 폴더", self.open_firmware_folder).place(x=140, y=435, width=130, height=28)
         self._win_button(
             g3,
             "선택 파일 다운로드 실행 (최대 3개 병렬)",
@@ -979,6 +997,9 @@ class FirmwareApp(tk.Toplevel):
             self.sort_asc = True
         self.files.sort(key=lambda x: str(x.get(col, "")).lower(), reverse=not self.sort_asc)
         self.refresh_list()
+
+    def open_firmware_folder(self):
+        open_save_folder(APP_DIR / "firmware")
 
     def toggle_select_all(self):
         visible = self.visible_files()
@@ -1423,6 +1444,7 @@ class DocumentApp(tk.Toplevel):
         box.grid_columnconfigure(0, weight=1)
 
         self._win_button(g3, "전체 선택/해제", self.toggle_select_all).place(x=15, y=435, width=110, height=28)
+        self._win_button(g3, "document 폴더", self.open_document_folder).place(x=140, y=435, width=130, height=28)
         self._win_button(
             g3, "선택 문서 다운로드 실행 (최대 10개 병렬)", self.on_download,
             bg="LightSkyBlue", bold=True,
@@ -1717,6 +1739,9 @@ class DocumentApp(tk.Toplevel):
             item["checked"] = self.select_all
         self.refresh_list()
 
+    def open_document_folder(self):
+        open_save_folder(APP_DIR / "document")
+
     def on_download(self):
         chosen = [f for f in self.files if f.get("checked")]
         if not chosen:
@@ -1740,18 +1765,773 @@ class DocumentApp(tk.Toplevel):
 
 
 
+
+
+DS_SITE = "https://www.ruckusnetworks.com"
+DS_PRODUCTS_HOME = "https://www.ruckusnetworks.com/products/"
+
+
+def ds_abs(href: str) -> str:
+    href = unescape((href or "").strip())
+    if not href:
+        return ""
+    return urljoin(DS_SITE + "/", href)
+
+
+def ds_norm_asset(url: str) -> str:
+    url = unescape(url or "").replace("&#x2B;", "+").replace("&amp;", "&")
+    return url.strip()
+
+
+def ds_safe_name(name: str) -> str:
+    name = re.sub(r'[<>:"/\\|?*]', "_", (name or "").strip())
+    return name or "Data Sheet.pdf"
+
+
+def ds_filename_from_url(url: str, product_name: str) -> str:
+    url = ds_norm_asset(url)
+    if "/download/assets/" in url:
+        raw = unquote(url.split("/download/assets/")[-1].split("/")[0]).replace("+", " ").strip()
+        if raw and raw.lower() not in {"data sheet", "datasheet", "view data sheet"}:
+            if Path(raw).suffix.lower() not in {".pdf", ".zip", ".html"}:
+                raw += ".pdf"
+            return ds_safe_name(raw)
+    m = re.search(r"downloadname=([^&]+)", url, re.I)
+    if m:
+        raw = unquote(m.group(1)).replace("+", " ").strip()
+        if raw:
+            return ds_safe_name(raw)
+    base = (product_name or "Data Sheet").replace("_", " ").strip()
+    if not re.search(r"(?i)data\s*sheet", base):
+        base = f"{base} Data Sheet"
+    if not Path(base).suffix:
+        base += ".pdf"
+    return ds_safe_name(base)
+
+
+def ds_dedupe_key(url: str) -> str:
+    url = ds_norm_asset(url)
+    path = urlparse(url).path.rstrip("/")
+    if "/download/assets/" in url:
+        return "asset:" + path.split("/")[-1].lower()
+    m = re.search(r"downloadname=([^&]+)", url, re.I)
+    if m:
+        return "file:" + unquote(m.group(1)).lower()
+    m = re.search(r"[?&]ID=([^&]+)", url)
+    if m:
+        return "id:" + unquote(m.group(1)).split(":")[0].lower()
+    return "url:" + url.split("?")[0].lower()
+
+
+def ds_is_pdf_link(url: str) -> bool:
+    u = (url or "").lower()
+    if u.endswith(".html") or "/datasheets/" in u and u.endswith(".html"):
+        return False
+    if "webresources.ruckuswireless.com/datasheets/" in u and not u.endswith(".pdf"):
+        return False
+    return True
+
+
+def ds_fetch_categories(sess: requests.Session):
+    html = sess.get(DS_PRODUCTS_HOME, timeout=30).text
+    cats = []
+    seen = set()
+    for href, name in re.findall(
+        r'class="curated-menu-link[^"]*" href="([^"]+)"[^>]*>([^<]+)',
+        html,
+    ):
+        url = ds_abs(href)
+        name = unescape(name).strip()
+        if not url or "/products/" not in url or not name:
+            continue
+        key = url.rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        cats.append({"name": name, "url": key + "/"})
+    return cats
+
+
+def ds_is_switch_family(name: str, url: str) -> bool:
+    slug = url.rstrip("/").split("/")[-1].lower()
+    if slug.startswith("item"):
+        return False
+    if re.fullmatch(r"icx\d+", slug):
+        return True
+    if re.search(r"(?i)\bICX\s*\d+\s+Switches\b", name):
+        return True
+    if re.search(r"(?i)\bICX\s*\d+-", name):
+        return False
+    return False
+
+
+def ds_parse_listing(html: str, group: str):
+    items = []
+    for href, name in re.findall(
+        r'<a href="([^"]+)" class="title title-ruckus">([^<]+)</a>',
+        html,
+    ):
+        url = ds_abs(href).rstrip("/")
+        name = unescape(name).strip()
+        if not url or not name or url.lower().endswith("/compare"):
+            continue
+        if group == "Ethernet Switches" and not ds_is_switch_family(name, url):
+            continue
+        items.append({"group": group, "id": url, "name": name, "url": url})
+    return items
+
+
+DS_FIXED_SPECS = (
+    {
+        "page": "https://www.ruckusnetworks.com/products/",
+        "group": "Guides",
+        "name": "RUCKUS Product Guide",
+        "texts": ("download our product guide",),
+        "assets": ("ruckus+product+guide",),
+    },
+    {
+        "page": "https://www.ruckusnetworks.com/products/",
+        "group": "Guides",
+        "name": "RUCKUS Accessory Guide",
+        "texts": ("download our accessory guide",),
+        "assets": ("ruckus+accessory+guide",),
+    },
+    {
+        "page": "https://www.ruckusnetworks.com/products/network-control-and-management/cloud-managed/",
+        "group": "Cloud-managed Systems",
+        "name": "Data Sheet: RUCKUS One",
+        "texts": ("download",),
+        "assets": ("data+sheet%3a+ruckus+one", "data+sheet:+ruckus+one", "ruckus+one"),
+    },
+    {
+        "page": "https://www.ruckusnetworks.com/products/network-control-and-management/network-controllers/",
+        "group": "Network Controllers",
+        "name": "RUCKUS SmartZone Family Data Sheet",
+        "texts": ("read data sheet",),
+        "assets": ("ruckus+smartzone+family+data+sheet",),
+    },
+    {
+        "page": "https://www.ruckusnetworks.com/products/network-control-and-management/controller-less/",
+        "group": "Controller-less Systems",
+        "name": "RUCKUS Unleashed Data Sheet",
+        "texts": ("download the ruckus unleashed data sheet", "unleashed data sheet"),
+        "assets": ("unleashed",),
+    },
+    {
+        "page": "https://www.ruckusnetworks.com/products/service-assurance-business-intelligence/",
+        "group": "Service Assurance and Business Intelligence",
+        "name": "RUCKUS AI Data Sheet",
+        "texts": ("download data sheet",),
+        "assets": ("ruckus+analytics+data+sheet", "ruckus+ai"),
+    },
+    {
+        "page": "https://www.ruckusnetworks.com/products/optical-transceivers/",
+        "group": "Optical Transceivers",
+        "name": "RUCKUS Optics Datasheet",
+        "texts": ("download data sheet",),
+        "assets": ("ethernet+optics", "optics"),
+    },
+    {
+        "page": "https://www.ruckusnetworks.com/products/accessories/",
+        "group": "Accessories",
+        "name": "RUCKUS Accessory Guide",
+        "texts": ("download guide", "ruckus accessory guide"),
+        "assets": ("ruckus+accessory+guide",),
+    },
+    {
+        "page": "https://www.ruckusnetworks.com/products/accessories/",
+        "group": "Accessories",
+        "name": "RUCKUS Fiber Backpack",
+        "texts": ("download data sheet",),
+        "assets": ("fiber+backpack",),
+    },
+    {
+        "page": "https://www.ruckusnetworks.com/products/accessories/",
+        "group": "Accessories",
+        "name": "RUCKUS Fiber Node",
+        "texts": ("download data sheet", "fiber node"),
+        "assets": ("fiber+node", "ds-fibernode.pdf"),
+    },
+)
+
+
+def ds_iter_download_anchors(html: str):
+    html = html.replace("&#x2B;", "+").replace("&amp;", "&")
+    for href, inner in re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.I | re.S):
+        text = unescape(re.sub(r"<[^>]+>", " ", inner))
+        text = re.sub(r"\s+", " ", text).strip()
+        yield ds_norm_asset(href), text
+
+
+def ds_match_fixed(html: str, spec: dict):
+    assets = tuple(a.lower() for a in spec.get("assets") or ())
+    texts = tuple(t.lower() for t in spec.get("texts") or ())
+    found = []
+    for href, text in ds_iter_download_anchors(html):
+        blob = f"{href} {text}".lower()
+        if assets and not any(a in blob for a in assets):
+            continue
+        if texts and not any(t in text.lower() or t in href.lower() for t in texts):
+            if not any(a in href.lower() for a in assets):
+                continue
+        if href.startswith("http") and ("webresources" in href or href.lower().endswith(".pdf") or "downloadname=" in href.lower()):
+            found.append((href, text))
+    if found:
+        found.sort(key=lambda x: (0 if "/download/assets/" in x[0] else 1, x[0]))
+        return found[0]
+    for href, text in ds_iter_download_anchors(html):
+        if any(a in href.lower() for a in assets):
+            return href, text
+    return None
+
+
+def ds_fetch_fixed_docs(sess: requests.Session):
+    cache = {}
+    extras = []
+    seen = set()
+    for spec in DS_FIXED_SPECS:
+        page = spec["page"]
+        if page not in cache:
+            try:
+                cache[page] = sess.get(page, timeout=30).text
+            except Exception:
+                cache[page] = ""
+        hit = ds_match_fixed(cache[page], spec)
+        if not hit:
+            continue
+        href, text = hit
+        key = ds_dedupe_key(href)
+        if key in seen:
+            continue
+        seen.add(key)
+        extras.append({
+            "group": spec["group"],
+            "id": href,
+            "name": spec["name"],
+            "url": spec["page"],
+            "download_url": href,
+            "filename": ds_filename_from_url(href, spec["name"]),
+            "title": spec["name"],
+        })
+    return extras
+
+
+def ds_fetch_products():
+    products = []
+    seen = set()
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": UA})
+    sess.verify = False
+    products.extend(ds_fetch_fixed_docs(sess))
+    for p in products:
+        seen.add(p.get("download_url") or p["url"])
+    allow_groups = {
+        "Wireless Access Points",
+        "Ethernet Switches",
+    }
+    for cat in ds_fetch_categories(sess):
+        if cat["name"] not in allow_groups:
+            continue
+        for page in range(1, 8):
+            list_url = f"{cat['url']}?pageSize=100&page={page}"
+            try:
+                html = sess.get(list_url, timeout=30).text
+            except Exception:
+                break
+            batch = ds_parse_listing(html, cat["name"])
+            added = 0
+            for prod in batch:
+                if prod["url"] in seen:
+                    continue
+                seen.add(prod["url"])
+                products.append(prod)
+                added += 1
+            if added == 0:
+                break
+    return products
+
+
+def ds_items_for_product(prod: dict):
+    name = clean_product_name(prod["name"])
+    if prod.get("download_url"):
+        return [{
+            "page_url": prod.get("url") or "",
+            "download_url": prod["download_url"],
+            "filename": prod.get("filename") or ds_filename_from_url(prod["download_url"], name),
+            "title": prod.get("title") or prod["name"],
+            "size": "PDF",
+            "version": "",
+            "product_folder": name,
+            "checked": False,
+        }]
+    return ds_parse_page(prod["url"], name)
+
+
+def ds_parse_page(page_url: str, product_name: str):
+    """모델 페이지 상단 'Download Data Sheet'만 사용. 관련 자료/중복/버튼문구 파일명은 제외."""
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": UA})
+    sess.verify = False
+    html = sess.get(page_url if page_url.endswith("/") else page_url + "/", timeout=30).text
+    items = []
+    seen = set()
+
+    def add(url):
+        url = ds_norm_asset(url)
+        if not url or not ds_is_pdf_link(url):
+            return
+        key = ds_dedupe_key(url)
+        if key in seen:
+            return
+        seen.add(key)
+        fname = ds_filename_from_url(url, product_name)
+        title = Path(fname).stem
+        items.append({
+            "page_url": page_url,
+            "download_url": url,
+            "filename": fname,
+            "title": title,
+            "size": "PDF",
+            "version": "",
+            "product_folder": product_name,
+            "checked": False,
+        })
+
+    urls = [ds_norm_asset(u) for u in re.findall(r'<a href="([^"]+)"[^>]*>\s*Download Data Sheet\s*<', html, re.I)]
+    if not urls:
+        urls = [ds_norm_asset(u) for u in re.findall(
+            r'<a href="([^"]+)"[^>]*class="[^"]*btn-comm-secondary[^"]*"[^>]*>\s*Download Data Sheet',
+            html,
+            re.I,
+        )]
+    official = [u for u in urls if "/download/assets/" in u]
+    if official:
+        urls = official[:1]
+    else:
+        urls = urls[:1]
+    for url in urls:
+        add(url)
+    return items
+
+
+def ds_download_one(file_item, dest_dir: Path, status: dict, cancel: threading.Event):
+    if cancel.is_set():
+        status["status"] = "중지됨"
+        return
+    url = file_item.get("download_url") or ""
+    save_name = re.sub(r'[<>:"/\\\\|?*]', "_", file_item.get("filename") or "datasheet.pdf").strip()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    save_path = dest_dir / save_name
+    status["filename"] = save_name
+    status["status"] = "다운로드 중..."
+    status["percent"] = 10
+    try:
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": UA})
+        sess.verify = False
+        with sess.get(url, stream=True, timeout=60, allow_redirects=True) as resp:
+            resp.raise_for_status()
+            cd = resp.headers.get("Content-Disposition") or ""
+            m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd, re.I)
+            if m:
+                real = re.sub(r'[<>:"/\\\\|?*]', "_", unquote(m.group(1).strip().strip('"'))).strip()
+                if real:
+                    save_path = dest_dir / real
+                    save_name = real
+                    status["filename"] = real
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            with open(save_path, "wb") as fh:
+                for chunk in resp.iter_content(65536):
+                    if cancel.is_set():
+                        status["status"] = "중지됨"
+                        return
+                    if not chunk:
+                        continue
+                    fh.write(chunk)
+                    done += len(chunk)
+                    if total:
+                        status["percent"] = min(99, int(done * 100 / total))
+        if save_path.exists() and save_path.stat().st_size > 0:
+            status["percent"] = 100
+            status["status"] = "완료"
+            status["sizeinfo"] = f"{save_path.stat().st_size / 1024:.1f} KB"
+            return
+    except Exception:
+        status["status"] = "오류"
+        return
+    status["status"] = "실패"
+
+
+class DatasheetProgressWindow(tk.Toplevel):
+    def __init__(self, master, items, dest_dir):
+        super().__init__(master)
+        self.title("다운로드 진행 상황")
+        self.resizable(False, False)
+        self.cancel = threading.Event()
+        self.done = False
+        self.rows = []
+        self.jobs = []
+        height = min(900, 80 + 56 * max(1, len(items)))
+        self.geometry(f"720x{height}")
+        for i, item in enumerate(items):
+            st = {"filename": item.get("filename", ""), "status": "대기 중...", "percent": 0, "sizeinfo": ""}
+            frm = ttk.Frame(self)
+            frm.pack(fill="x", padx=16, pady=6)
+            lbl = ttk.Label(frm, text=f"[{i+1}/{len(items)}] 대기 중: {item.get('filename','')}")
+            lbl.pack(anchor="w")
+            bar = ttk.Progressbar(frm, maximum=100)
+            bar.pack(fill="x", pady=4)
+            self.rows.append((lbl, bar, st))
+            self.jobs.append((item, st))
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        threading.Thread(target=self._run, args=(dest_dir,), daemon=True).start()
+        self.after(200, self._tick)
+
+    def _run(self, dest_dir):
+        with ThreadPoolExecutor(max_workers=min(10, max(1, len(self.jobs)))) as pool:
+            futs = [
+                pool.submit(ds_download_one, item, item.get("dest_dir") or dest_dir, st, self.cancel)
+                for item, st in self.jobs
+            ]
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception:
+                    pass
+        self.done = True
+
+    def _tick(self):
+        total = len(self.rows)
+        for i, (lbl, bar, st) in enumerate(self.rows):
+            bar["value"] = max(0, min(100, st.get("percent", 0)))
+            lbl["text"] = f"[{i+1}/{total}] [{st.get('status')}] [{st.get('sizeinfo','')}] {st.get('filename')}"
+        if self.done:
+            self.destroy()
+            return
+        self.after(200, self._tick)
+
+    def on_close(self):
+        if not self.done:
+            self.cancel.set()
+        self.destroy()
+
+
+class DatasheetApp(tk.Toplevel):
+    def __init__(self, master=None):
+        if master is None:
+            root = tk.Tk()
+            root.withdraw()
+            self._own_root = root
+            super().__init__(root)
+        else:
+            self._own_root = None
+            super().__init__(master)
+        self.title(f"Ruckus Datasheet Downloader {VERSION} (GUI)")
+        self.geometry("850x760")
+        self.minsize(850, 760)
+        self.resizable(False, False)
+        self.configure(bg="#F0F0F0")
+        self.products = []
+        self.files = []
+        self.select_all = False
+        self.bind("<FocusIn>", lambda e: self._refresh_session_label())
+        self._build()
+        self.after(100, self._startup)
+        if self._own_root is not None:
+            self.protocol("WM_DELETE_WINDOW", self._close_standalone)
+
+    def _close_standalone(self):
+        self.destroy()
+        if self._own_root is not None:
+            self._own_root.destroy()
+
+    def _win_button(self, parent, text, command, bg="#F0F0F0", bold=False):
+        font = ("맑은 고딕", 9, "bold") if bold else ("맑은 고딕", 9)
+        return tk.Button(
+            parent, text=text, command=command, bg=bg, activebackground=bg,
+            fg="#000000", font=font, relief="raised", bd=1,
+            highlightthickness=0, cursor="hand2",
+        )
+
+    def _make_check_images(self, size=13):
+        def box(on):
+            img = tk.PhotoImage(width=size, height=size)
+            img.put("#ffffff", to=(0, 0, size, size))
+            for i in range(size):
+                img.put("#333333", to=(i, 0))
+                img.put("#333333", to=(i, size - 1))
+                img.put("#333333", to=(0, i))
+                img.put("#333333", to=(size - 1, i))
+            if on:
+                for i in range(3, size - 3):
+                    for j in range(3, size - 3):
+                        img.put("#1565c0", to=(i, j))
+            return img
+        return box(False), box(True)
+
+    def _build(self):
+        style = ttk.Style(self)
+        for theme in ("vista", "xpnative", "clam"):
+            try:
+                style.theme_use(theme)
+                break
+            except tk.TclError:
+                continue
+        style.configure("TFrame", background="#F0F0F0")
+        style.configure("TLabel", background="#F0F0F0", font=("맑은 고딕", 9))
+        style.configure("TLabelframe", background="#F0F0F0")
+        style.configure("TLabelframe.Label", background="#F0F0F0", font=("맑은 고딕", 9, "bold"))
+        style.configure("File.Treeview", rowheight=20, font=("맑은 고딕", 9), indent=0)
+        style.configure("Status.TLabel", background="#F0F0F0", font=("맑은 고딕", 9))
+        style.layout("File.Treeview.Item", [
+            ("Treeitem.padding", {"sticky": "nswe", "children": [
+                ("Treeitem.image", {"side": "left", "sticky": ""}),
+                ("Treeitem.focus", {"side": "left", "sticky": "", "children": [
+                    ("Treeitem.text", {"side": "left", "sticky": ""}),
+                ]}),
+            ]}),
+        ])
+
+        g1 = ttk.LabelFrame(self, text=" 1. 계정 세션 정보 ")
+        g1.place(x=15, y=10, width=805, height=62)
+        self.lbl_session = tk.Label(
+            g1, text="세션 : 유효함", bg="#F0F0F0", fg="green",
+            font=("맑은 고딕", 9), anchor="w",
+        )
+        self.lbl_session.place(x=16, y=16, width=770, height=24)
+
+        g2 = ttk.LabelFrame(self, text=" 2. 제품 선택 ")
+        g2.place(x=15, y=80, width=805, height=102)
+        ttk.Label(g2, text="제품 선택:").place(x=15, y=28)
+        self.cmb_prod = ttk.Combobox(g2, state="readonly", font=("맑은 고딕", 9))
+        self.cmb_prod.place(x=85, y=25, width=500, height=23)
+        self.cmb_prod.bind("<<ComboboxSelected>>", lambda e: self.on_product_change())
+        self._win_button(g2, "데이터시트 조회", self.on_fetch).place(x=600, y=24, width=180, height=27)
+        self.lbl_info = tk.Label(g2, text="제품을 불러오는 중입니다...", bg="#F0F0F0", fg="blue", font=("맑은 고딕", 9), anchor="w")
+        self.lbl_info.place(x=16, y=56, width=775, height=24)
+
+        g3 = ttk.LabelFrame(self, text=" 3. 다운로드 가능 데이터시트 목록 ")
+        g3.place(x=15, y=190, width=805, height=500)
+        ttk.Label(g3, text="결과 내 검색:").place(x=15, y=25)
+        self.ent_search = ttk.Entry(g3, font=("맑은 고딕", 9))
+        self.ent_search.place(x=95, y=23, width=695, height=23)
+        self.ent_search.bind("<KeyRelease>", lambda e: self.refresh_list())
+
+        box = tk.Frame(g3, bg="white", highlightthickness=1, highlightbackground="#D0D0D0")
+        box.place(x=15, y=55, width=775, height=370)
+        self.img_off, self.img_on = self._make_check_images(13)
+        cols = ("filename", "size", "title")
+        self.tree = ttk.Treeview(box, columns=cols, show="tree headings", selectmode="browse", height=16, style="File.Treeview")
+        self.tree.heading("#0", text="")
+        self.tree.column("#0", width=32, minwidth=32, stretch=False, anchor="center")
+        self.tree.heading("filename", text="파일명")
+        self.tree.heading("size", text="유형")
+        self.tree.heading("title", text="제목")
+        self.tree.column("filename", width=320, stretch=False)
+        self.tree.column("size", width=70, stretch=False)
+        self.tree.column("title", width=350, stretch=False)
+        self.tree.bind("<Button-1>", self.on_tree_click)
+        ys = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
+        xs = ttk.Scrollbar(box, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        xs.grid(row=1, column=0, sticky="ew")
+        box.grid_rowconfigure(0, weight=1)
+        box.grid_columnconfigure(0, weight=1)
+
+        self._win_button(g3, "전체 선택/해제", self.toggle_select_all).place(x=15, y=435, width=110, height=28)
+        self._win_button(g3, "datasheet 폴더", self.open_datasheet_folder).place(x=140, y=435, width=130, height=28)
+        self._win_button(
+            g3, "선택 데이터시트 다운로드 실행 (최대 10개 병렬)", self.on_download,
+            bg="LightSkyBlue", bold=True,
+        ).place(x=480, y=432, width=310, height=33)
+
+        self.status = tk.StringVar(value="준비 완료.")
+        bar = tk.Frame(self, bg="#F0F0F0", relief="sunken", bd=1)
+        bar.place(x=0, y=700, width=850, height=24)
+        ttk.Label(bar, textvariable=self.status, style="Status.TLabel", anchor="w").pack(fill="x", padx=8)
+
+    def set_session_label(self, text, ok=None):
+        self.lbl_session["text"] = text
+        if ok is True:
+            self.lbl_session["fg"] = "green"
+        elif ok is False:
+            self.lbl_session["fg"] = "red"
+        else:
+            self.lbl_session["fg"] = "#333333"
+
+    def _refresh_session_label(self):
+        if not hasattr(self, "lbl_session"):
+            return
+        try:
+            code = check_cookie_status()
+        except Exception:
+            code = 2 if cookie_valid() else (0 if not COOKIE_FILE.exists() else 1)
+        if code == 2:
+            self.set_session_label("세션 : 유효함", True)
+        elif code == 1:
+            self.set_session_label("세션 : 쿠키 삭제후 로그인", False)
+        else:
+            self.set_session_label("세션 : 쿠키없음. 로그인", False)
+
+    def _startup(self):
+        (DS_SAVE_DIR).mkdir(parents=True, exist_ok=True)
+        self.set_session_label("세션 : 유효함", True)
+        self.status.set("홈페이지 제품 목록을 불러오는 중...")
+
+        def work():
+            try:
+                products = ds_fetch_products()
+                err = None
+            except Exception as exc:
+                products, err = [], str(exc)
+            self.after(0, lambda: self._products_done(products, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _products_done(self, products, err):
+        self.products = products
+        labels = ["ALL (전체)"] + [f"[{p['group']}] {p['name']}" for p in products]
+        self.cmb_prod["values"] = labels
+        if products:
+            self.cmb_prod.current(0)
+            self.status.set(f"데이터시트 제품 {len(products)}개.")
+            self.on_product_change()
+        else:
+            self.status.set("제품 목록을 불러오지 못했습니다." + (f" {err}" if err else ""))
+
+    def on_product_change(self):
+        idx = self.cmb_prod.current()
+        if idx == 0:
+            self.lbl_info["text"] = f"ALL | 전체 {len(self.products)}개"
+            return
+        real = idx - 1
+        if real < 0 or real >= len(self.products):
+            return
+        prod = self.products[real]
+        self.lbl_info["text"] = f"{prod['group']} | {prod['name']}"
+
+    def on_fetch(self):
+        idx = self.cmb_prod.current()
+        if idx < 0:
+            return
+        targets = list(self.products) if idx == 0 else (
+            [self.products[idx - 1]] if 0 <= idx - 1 < len(self.products) else []
+        )
+        if not targets:
+            return
+        self.status.set("데이터시트 항목 분석 중...")
+        self.files = []
+        self.refresh_list()
+
+        def work():
+            items = []
+            seen = set()
+            err = None
+            try:
+                if len(targets) == 1:
+                    batch = ds_items_for_product(targets[0])
+                    items.extend(batch)
+                else:
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        futs = [pool.submit(ds_items_for_product, prod) for prod in targets]
+                        done = 0
+                        total = len(futs)
+                        for fut in as_completed(futs):
+                            done += 1
+                            try:
+                                batch = fut.result() or []
+                            except Exception:
+                                batch = []
+                            for it in batch:
+                                key = ds_dedupe_key(it.get("download_url") or it.get("filename") or "")
+                                if key in seen:
+                                    continue
+                                seen.add(key)
+                                items.append(it)
+                            self.after(0, lambda d=done, t=total: self.status.set(f"데이터시트 항목 분석 중... ({d}/{t})"))
+            except Exception as exc:
+                err = str(exc)
+            self.after(0, lambda: self._files_done(items, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _files_done(self, items, err):
+        self.files = items
+        self.select_all = False
+        self.refresh_list()
+        if err:
+            self.status.set(f"데이터시트 목록 실패: {err}")
+        else:
+            self.status.set(f"총 {len(items)}개 데이터시트 항목 파싱 완료.")
+
+    def refresh_list(self):
+        q = (self.ent_search.get() or "").lower()
+        self.tree.delete(*self.tree.get_children())
+        for i, item in enumerate(self.files):
+            blob = f"{item.get('filename','')} {item.get('title','')}".lower()
+            if q and q not in blob:
+                continue
+            img = self.img_on if item.get("checked") else self.img_off
+            self.tree.insert("", "end", iid=str(i), image=img, values=(item.get("filename", ""), item.get("size", ""), item.get("title", "")))
+
+    def on_tree_click(self, event):
+        row = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
+        if not row:
+            return
+        if col == "#0":
+            idx = int(row)
+            if 0 <= idx < len(self.files):
+                self.files[idx]["checked"] = not self.files[idx].get("checked")
+                self.tree.item(row, image=self.img_on if self.files[idx]["checked"] else self.img_off)
+            return "break"
+
+    def toggle_select_all(self):
+        self.select_all = not self.select_all
+        for item in self.files:
+            item["checked"] = self.select_all
+        self.refresh_list()
+
+    def open_datasheet_folder(self):
+        open_save_folder(DS_SAVE_DIR)
+
+    def on_download(self):
+        chosen = [f for f in self.files if f.get("checked")]
+        if not chosen:
+            messagebox.showwarning("알림", "다운로드할 데이터시트를 선택하세요.")
+            return
+        for f in chosen:
+            folder = f.get("product_folder") or "Unknown"
+            dest = DS_SAVE_DIR / folder
+            dest.mkdir(parents=True, exist_ok=True)
+            f["dest_dir"] = dest
+        win = DatasheetProgressWindow(self, chosen, chosen[0]["dest_dir"])
+        self.wait_window(win)
+        cancelled = any(st.get("status") == "중지됨" for _, st in getattr(win, "jobs", []))
+        if cancelled:
+            messagebox.showinfo("알림", "사용자에 의해 다운로드가 중단되었습니다.")
+        else:
+            messagebox.showinfo("완료", "선택한 모든 파일의 다운로드 작업이 완료되었습니다.")
+
+
+
 class UnifiedApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"Ruckus_All_Downloader {VERSION}")
-        self.geometry("980x430")
-        self.minsize(980, 430)
+        self.geometry("980x500")
+        self.minsize(980, 500)
         self.resizable(False, False)
         self.configure(bg="#F0F0F0")
         self.fw_win = None
         self.doc_win = None
+        self.ds_win = None
         (APP_DIR / "firmware").mkdir(parents=True, exist_ok=True)
         (APP_DIR / "document").mkdir(parents=True, exist_ok=True)
+        DS_SAVE_DIR.mkdir(parents=True, exist_ok=True)
         self._build()
         self.after(100, self.refresh_session)
         if gh_updater:
@@ -1839,10 +2619,10 @@ class UnifiedApp(tk.Tk):
 
         self._big_btn(self, "펌웨어 다운로드", self.open_firmware).place(x=90, y=175, width=380, height=52)
         self._big_btn(self, "문서 다운로드", self.open_document, bg="#2e7d32").place(x=510, y=175, width=380, height=52)
-
+        self._big_btn(self, "데이터시트 다운로드", self.open_datasheet, bg="#6f42c1").place(x=90, y=240, width=800, height=52)
         self.status = tk.StringVar(value="준비 완료.")
         bar = tk.Frame(self, bg="#F0F0F0", relief="sunken", bd=1)
-        bar.place(x=0, y=406, width=980, height=24)
+        bar.place(x=0, y=476, width=980, height=24)
         ttk.Label(bar, textvariable=self.status, style="Status.TLabel", anchor="w").pack(fill="x", padx=8)
 
     def _alive(self, win):
@@ -1873,14 +2653,27 @@ class UnifiedApp(tk.Tk):
         self.doc_win = DocumentApp(self)
         self.doc_win.protocol("WM_DELETE_WINDOW", lambda: self._close("doc"))
 
+    def open_datasheet(self):
+        if not self.session_ok():
+            messagebox.showwarning("알림", "로그인 및 세션 갱신을 먼저 진행하세요.")
+            return
+        if self._alive(self.ds_win):
+            self.ds_win.lift()
+            self.ds_win.focus_force()
+            return
+        self.ds_win = DatasheetApp(self)
+        self.ds_win.protocol("WM_DELETE_WINDOW", lambda: self._close("ds"))
+
     def _close(self, which):
-        win = self.fw_win if which == "fw" else self.doc_win
+        win = {"fw": self.fw_win, "doc": self.doc_win, "ds": getattr(self, "ds_win", None)}.get(which)
         if self._alive(win):
             win.destroy()
         if which == "fw":
             self.fw_win = None
-        else:
+        elif which == "doc":
             self.doc_win = None
+        else:
+            self.ds_win = None
 
     def on_login(self):
         user = self.ent_user.get().strip()
