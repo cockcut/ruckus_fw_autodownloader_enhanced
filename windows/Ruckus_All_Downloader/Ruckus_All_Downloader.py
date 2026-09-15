@@ -51,6 +51,8 @@ ALLOWED_GROUPS = {
     "RUCKUS Indoor APs",
     "RUCKUS Outdoor APs",
     "RUCKUS ICX Switches",
+    "RUCKUS Edge and virtual Edge",
+    "SmartZone (SZ)",
     "Virtual SmartZone (vSZ)",
     "RUCKUS Unleashed",
 }
