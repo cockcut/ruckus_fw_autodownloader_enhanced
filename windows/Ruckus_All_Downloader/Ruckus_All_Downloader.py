@@ -41,7 +41,7 @@ except Exception:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "v0.0.1p2"
+VERSION = "v0.0.1p3"
 BASE_URL = "https://support.ruckuswireless.com"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -63,8 +63,7 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 
 COOKIE_FILE = APP_DIR / "cookies.txt"
-_ds_sib = Path(__file__).resolve().parent.parent / "datasheet"
-DS_SAVE_DIR = (_ds_sib if _ds_sib.is_dir() else APP_DIR) / "datasheet"
+DS_SAVE_DIR = APP_DIR / "datasheet"
 
 
 def open_save_folder(path: Path):
@@ -471,22 +470,51 @@ def fw_download_one(file_item, dest_dir: Path, status: dict, cancel: threading.E
     status["status"] = "실패"
 
 
+def _make_progress_scroll_body(win, count):
+    win.resizable(True, True)
+    height = min(560, 120 + 56 * max(1, min(8, count)))
+    win.geometry(f"740x{height}")
+    win.minsize(640, 280)
+    wrap = ttk.Frame(win)
+    wrap.pack(fill="both", expand=True)
+    canvas = tk.Canvas(wrap, highlightthickness=0, bg="#F0F0F0")
+    vsb = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+    inner = ttk.Frame(canvas)
+    win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=vsb.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    vsb.pack(side="right", fill="y")
+    inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win_id, width=max(1, e.width)))
+
+    def _wheel(e):
+        if hasattr(e, "delta") and e.delta:
+            canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        elif getattr(e, "num", 0) in (4, 5):
+            canvas.yview_scroll(-1 if e.num == 4 else 1, "units")
+        return "break"
+
+    canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _wheel))
+    canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+    canvas.bind("<Button-4>", _wheel)
+    canvas.bind("<Button-5>", _wheel)
+    ttk.Label(inner, text=f"총 {count}개 파일").pack(anchor="w", padx=16, pady=(10, 4))
+    return inner
+
+
 class FirmwareProgressWindow(tk.Toplevel):
     def __init__(self, master, items, dest_dir):
         super().__init__(master)
         self.title("다운로드 진행 상황")
-        self.resizable(False, False)
         self.cancel = threading.Event()
         self.done = False
         self.rows = []
         self.jobs = []
-
-        height = min(900, 80 + 56 * len(items))
-        self.geometry(f"720x{height}")
+        inner = _make_progress_scroll_body(self, len(items))
 
         for i, item in enumerate(items):
             st = {"filename": item["filename"], "percent": 0, "status": "대기 중...", "sizeinfo": item["size"]}
-            frm = ttk.Frame(self)
+            frm = ttk.Frame(inner)
             frm.pack(fill="x", padx=16, pady=6)
             lbl = ttk.Label(frm, text=f"[{i+1}/{len(items)}] 대기 중: {item['filename']}")
             lbl.pack(anchor="w")
@@ -1273,16 +1301,14 @@ class DocumentProgressWindow(tk.Toplevel):
     def __init__(self, master, items, dest_dir):
         super().__init__(master)
         self.title("다운로드 진행 상황")
-        self.resizable(False, False)
         self.cancel = threading.Event()
         self.done = False
         self.rows = []
         self.jobs = []
-        height = min(900, 80 + 56 * max(1, len(items)))
-        self.geometry(f"720x{height}")
+        inner = _make_progress_scroll_body(self, len(items))
         for i, item in enumerate(items):
             st = {"filename": item.get("filename", ""), "status": "대기 중...", "percent": 0, "sizeinfo": item.get("size", "")}
-            frm = ttk.Frame(self)
+            frm = ttk.Frame(inner)
             frm.pack(fill="x", padx=16, pady=6)
             lbl = ttk.Label(frm, text=f"[{i+1}/{len(items)}] 대기 중: {item.get('filename','')}")
             lbl.pack(anchor="w")
@@ -2169,16 +2195,14 @@ class DatasheetProgressWindow(tk.Toplevel):
     def __init__(self, master, items, dest_dir):
         super().__init__(master)
         self.title("다운로드 진행 상황")
-        self.resizable(False, False)
         self.cancel = threading.Event()
         self.done = False
         self.rows = []
         self.jobs = []
-        height = min(900, 80 + 56 * max(1, len(items)))
-        self.geometry(f"720x{height}")
+        inner = _make_progress_scroll_body(self, len(items))
         for i, item in enumerate(items):
             st = {"filename": item.get("filename", ""), "status": "대기 중...", "percent": 0, "sizeinfo": ""}
-            frm = ttk.Frame(self)
+            frm = ttk.Frame(inner)
             frm.pack(fill="x", padx=16, pady=6)
             lbl = ttk.Label(frm, text=f"[{i+1}/{len(items)}] 대기 중: {item.get('filename','')}")
             lbl.pack(anchor="w")

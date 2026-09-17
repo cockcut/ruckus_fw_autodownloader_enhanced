@@ -1,2 +1,2 @@
 Ruckus_All_Downloader
-v0.0.1p2
+v0.0.1p3
