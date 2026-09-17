@@ -14,7 +14,6 @@ import shutil
 import threading
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date
 from html import unescape
 from pathlib import Path
 from urllib.parse import unquote
@@ -43,7 +42,7 @@ gh_updater.configure(
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "v0.0.1"
+VERSION = "v0.0.1p3"
 BASE_URL = "https://support.ruckuswireless.com"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -77,44 +76,6 @@ def load_cookie_module():
     sys.path.insert(0, str(app_path("get_ruckus_cookie.py").parent))
     import get_ruckus_cookie as cookie_mod  # noqa: WPS433
     return cookie_mod
-
-
-def check_cookie_status(path: Path = COOKIE_FILE) -> int:
-    """
-    반환 값:
-      0: 쿠키 없음 (파일 미존재 또는 읽기 실패)
-      1: 쿠키는 존재하나 생성/수정일이 오늘 날짜가 아니거나 만료됨
-      2: 오늘 생성되었고 유효함
-    """
-    if not path.exists():
-        return 0
-
-    # 파일 수정 시간이 오늘 날짜인지 확인
-    file_mtime = datetime.fromtimestamp(path.stat().st_mtime).date()
-    if file_mtime != date.today():
-        return 1
-
-    now = int(time.time())
-    try:
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except OSError:
-        return 0
-
-    valid_cookie_found = False
-    for line in lines:
-        if not line.strip() or line.startswith("#"):
-            continue
-        parts = line.split("\t")
-        if len(parts) >= 7 and parts[5].strip() == "production_ruckus_support":
-            try:
-                exp = int(parts[4].strip() or "0")
-            except ValueError:
-                return 1
-            if exp > now:
-                valid_cookie_found = True
-                break
-
-    return 2 if valid_cookie_found else 1
 
 
 def cookie_valid(path: Path = COOKIE_FILE) -> bool:
@@ -441,22 +402,51 @@ def download_one(file_item, dest_dir: Path, status: dict, cancel: threading.Even
     status["status"] = "실패"
 
 
+def _make_progress_scroll_body(win, count):
+    win.resizable(True, True)
+    height = min(560, 120 + 56 * max(1, min(8, count)))
+    win.geometry(f"740x{height}")
+    win.minsize(640, 280)
+    wrap = ttk.Frame(win)
+    wrap.pack(fill="both", expand=True)
+    canvas = tk.Canvas(wrap, highlightthickness=0, bg="#F0F0F0")
+    vsb = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+    inner = ttk.Frame(canvas)
+    win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=vsb.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    vsb.pack(side="right", fill="y")
+    inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win_id, width=max(1, e.width)))
+
+    def _wheel(e):
+        if hasattr(e, "delta") and e.delta:
+            canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        elif getattr(e, "num", 0) in (4, 5):
+            canvas.yview_scroll(-1 if e.num == 4 else 1, "units")
+        return "break"
+
+    canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _wheel))
+    canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+    canvas.bind("<Button-4>", _wheel)
+    canvas.bind("<Button-5>", _wheel)
+    ttk.Label(inner, text=f"총 {count}개 파일").pack(anchor="w", padx=16, pady=(10, 4))
+    return inner
+
+
 class ProgressWindow(tk.Toplevel):
     def __init__(self, master, items, dest_dir):
         super().__init__(master)
         self.title("다운로드 진행 상황")
-        self.resizable(False, False)
         self.cancel = threading.Event()
         self.done = False
         self.rows = []
         self.jobs = []
-
-        height = min(900, 80 + 56 * len(items))
-        self.geometry(f"720x{height}")
+        inner = _make_progress_scroll_body(self, len(items))
 
         for i, item in enumerate(items):
             st = {"filename": item["filename"], "percent": 0, "status": "대기 중...", "sizeinfo": item["size"]}
-            frm = ttk.Frame(self)
+            frm = ttk.Frame(inner)
             frm.pack(fill="x", padx=16, pady=6)
             lbl = ttk.Label(frm, text=f"[{i+1}/{len(items)}] 대기 중: {item['filename']}")
             lbl.pack(anchor="w")
@@ -685,20 +675,13 @@ class App(tk.Tk):
             load_cookie_module()
         except Exception as exc:
             messagebox.showerror("오류", f"get_ruckus_cookie.py 를 불러오지 못했습니다.\n{exc}")
-            
-        status_code = check_cookie_status()
-        
-        if status_code == 2:
-            self.set_session_label("세션: 유효함", True)
+        if cookie_valid():
+            self.set_session_label("세션 상태: 유효함", True)
             self.load_products_async()
-        elif status_code == 1:
-            self.set_session_label("세션: 쿠키 삭제후 로그인", False)
-            self.status.set("오늘 발급된 쿠키가 아닙니다. 로그인을 다시 진행해주세요.")
-            self.lbl_info["text"] = "제품을 불러오려면 로그인이 필요합니다."
-        else:  # status_code == 0
-            self.set_session_label("세션: 쿠키없음. 로그인", False)
+        else:
+            self.set_session_label("세션 상태: 만료됨/없음", False)
             self.status.set("계정 정보를 입력하고 로그인을 진행해주세요.")
-            self.lbl_info["text"] = "제품을 불러오려면 로그인이 필요합니다."
+            self.lbl_info["text"] = "버전을 불러오려면 로그인이 필요합니다."
 
     def _silent_update_check(self):
         threading.Thread(target=self._check_update_worker, args=(False,), daemon=True).start()
@@ -793,11 +776,11 @@ class App(tk.Tk):
 
     def _login_done(self, ok):
         if ok and cookie_valid():
-            self.set_session_label("세션: 유효함 (성공)", True)
+            self.set_session_label("세션 상태: 유효함 (성공)", True)
             self.status.set("로그인 성공!")
             self.load_products_async()
         else:
-            self.set_session_label("세션: 로그인 실패", False)
+            self.set_session_label("세션 상태: 로그인 실패", False)
             messagebox.showerror("오류", "로그인에 실패했습니다. 계정 정보를 확인하세요.")
 
     def on_clear_cookie(self):
@@ -816,7 +799,7 @@ class App(tk.Tk):
         self.cmb_prod.set("")
         self.cmb_ver.set("")
         self.refresh_list()
-        self.set_session_label("세션: 쿠키 없음", False)
+        self.set_session_label("세션 상태: 쿠키 없음", False)
         self.status.set("쿠키를 삭제했습니다. 다시 로그인하세요.")
         self.lbl_info["text"] = "버전을 불러오려면 로그인이 필요합니다."
 
