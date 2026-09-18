@@ -19,8 +19,8 @@ if not defined PY if exist "%ProgramFiles%\Python312\python.exe" set "PY=%Progra
 if not defined PY where python >nul 2>&1 && for /f "delims=" %%P in ('where python') do if not defined PY set "PY=%%P"
 
 if not defined PY (
-    echo [¿À·ù] PythonÀ» Ã£À» ¼ö ¾ø½À´Ï´Ù.
-    echo        Python 3.12 ÀÌ»óÀ» ¼³Ä¡ÇÑ µÚ ´Ù½Ã ½ÇÇàÇÏ¼¼¿ä.
+    echo [ï¿½ï¿½ï¿½ï¿½] Pythonï¿½ï¿½ Ã£ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½.
+    echo        Python 3.12 ï¿½Ì»ï¿½ï¿½ï¿½ ï¿½ï¿½Ä¡ï¿½ï¿½ ï¿½ï¿½ ï¿½Ù½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½Ï¼ï¿½ï¿½ï¿½.
     pause
     exit /b 1
 )
@@ -29,34 +29,34 @@ echo [*] Python:
 "%PY%" --version
 echo.
 
-echo [*] ºôµå¿¡ ÇÊ¿äÇÑ ÆÐÅ°Áö¸¦ ¼³Ä¡ÇÕ´Ï´Ù...
+echo [*] ï¿½ï¿½ï¿½å¿¡ ï¿½Ê¿ï¿½ï¿½ï¿½ ï¿½ï¿½Å°ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½Ä¡ï¿½Õ´Ï´ï¿½...
 "%PY%" -m pip install --upgrade pip
 "%PY%" -m pip install pyinstaller requests beautifulsoup4 lxml
 if errorlevel 1 (
-    echo [¿À·ù] ÆÐÅ°Áö ¼³Ä¡¿¡ ½ÇÆÐÇß½À´Ï´Ù.
+    echo [ï¿½ï¿½ï¿½ï¿½] ï¿½ï¿½Å°ï¿½ï¿½ ï¿½ï¿½Ä¡ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ß½ï¿½ï¿½Ï´ï¿½.
     pause
     exit /b 1
 )
 
 if not exist "Ruckus_Unleashed_Downloader.py" (
-    echo [¿À·ù] Ruckus_Unleashed_Downloader.py °¡ ¾ø½À´Ï´Ù.
+    echo [ï¿½ï¿½ï¿½ï¿½] Ruckus_Unleashed_Downloader.py ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½.
     pause
     exit /b 1
 )
 if not exist "updater.py" (
-    echo [¿À·ù] updater.py °¡ ¾ø½À´Ï´Ù.
+    echo [ï¿½ï¿½ï¿½ï¿½] updater.py ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½.
     pause
     exit /b 1
 )
 
 if not exist "get_ruckus_cookie.py" (
-    echo [¿À·ù] get_ruckus_cookie.py °¡ ¾ø½À´Ï´Ù.
+    echo [ï¿½ï¿½ï¿½ï¿½] get_ruckus_cookie.py ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½.
     pause
     exit /b 1
 )
 
 echo.
-echo [*] PyInstaller ·Î ´ÜÀÏ EXE¸¦ »ý¼ºÇÕ´Ï´Ù...
+echo [*] PyInstaller ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ EXEï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½Õ´Ï´ï¿½...
 echo.
 
 "%PY%" -m PyInstaller --noconfirm --clean --windowed --onefile ^
@@ -73,7 +73,7 @@ echo.
 
 if errorlevel 1 (
     echo.
-    echo [¿À·ù] ºôµå¿¡ ½ÇÆÐÇß½À´Ï´Ù.
+    echo [ï¿½ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½å¿¡ ï¿½ï¿½ï¿½ï¿½ï¿½ß½ï¿½ï¿½Ï´ï¿½.
     if exist "build" rmdir /s /q "build"
     if exist "Ruckus_Unleashed_Downloader.spec" del /q "Ruckus_Unleashed_Downloader.spec"
     pause
@@ -85,12 +85,16 @@ if exist "Ruckus_Unleashed_Downloader.spec" del /q "Ruckus_Unleashed_Downloader.
 
 if exist "dist\Ruckus_Unleashed_Downloader.exe" (
     echo.
+    echo [*] Writing SHA256 file...
+    "%PY%" -c "import hashlib,pathlib; p=pathlib.Path(r'dist')/'Ruckus_Unleashed_Downloader.exe'; h=hashlib.sha256(p.read_bytes()).hexdigest(); out=pathlib.Path(str(p)+'.sha256'); out.write_text(h+'  '+p.name+'\n', encoding='ascii'); print('   ', out); print('   ', h)"
+    echo.
     echo ============================================================
-    echo [+] ºôµå ¿Ï·á
+    echo [+] Build done
     echo     %cd%\dist\Ruckus_Unleashed_Downloader.exe
+    echo     %cd%\dist\Ruckus_Unleashed_Downloader.exe.sha256
     echo ============================================================
 ) else (
-    echo [¿À·ù] dist\Ruckus_Unleashed_Downloader.exe ¸¦ Ã£Áö ¸øÇß½À´Ï´Ù.
+    echo [ï¿½ï¿½ï¿½ï¿½] dist\Ruckus_Unleashed_Downloader.exe ï¿½ï¿½ Ã£ï¿½ï¿½ ï¿½ï¿½ï¿½ß½ï¿½ï¿½Ï´ï¿½.
     pause
     exit /b 1
 )
