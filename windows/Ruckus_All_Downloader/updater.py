@@ -110,61 +110,49 @@ def _norm_ver(s: str) -> str:
     return t.lower()
 
 
-def find_remote_exe() -> dict:
-    r = _get(API_RELEASES, timeout=15)
-    if r.status_code == 200:
-        data = r.json() or {}
-        picked = None
-        for a in data.get("assets") or []:
-            name = a.get("name") or ""
-            if not name.lower().endswith(".exe"):
-                continue
-            picked = a
-            if name == EXE_NAME:
-                break
-        if picked and picked.get("browser_download_url"):
-            return {
-                "id": f"rel:{data.get('tag_name') or data.get('id')}:{picked.get('id')}",
-                "name": picked.get("name") or EXE_NAME,
-                "url": picked.get("browser_download_url"),
-                "size": picked.get("size") or 0,
-                "tag": str(data.get("tag_name") or ""),
-                "digest": picked.get("digest") or "",
-                "git_sha": "",
-            }
-    elif r.status_code not in (404,):
-        if r.status_code == 403:
-            raise RuntimeError("GitHub API 제한 또는 저장소 접근 거부.")
-        r.raise_for_status()
+def latest_release_tag() -> str:
+    url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+    r = _get(url, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"Release 페이지를 열 수 없습니다. ({r.status_code})")
+    tag = (r.url or "").rstrip("/").split("/")[-1]
+    if not tag or tag.lower() == "latest":
+        raise RuntimeError("Latest Release 태그를 읽지 못했습니다.")
+    return tag
 
-    last_err = "GitHub Releases와 저장소에서 exe를 찾지 못했습니다."
-    for rel in (
-        f"{REPO_DIR}/dist/{EXE_NAME}",
-        f"{REPO_DIR}/{EXE_NAME}",
-        f"windows/dist/{EXE_NAME}",
-        f"release/{EXE_NAME}",
-    ):
-        cr = _get(f"{API_CONTENTS}/{rel}?ref={GITHUB_BRANCH}", timeout=15)
-        if cr.status_code == 404:
+
+def _parse_sha256_text(text: str) -> str:
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
             continue
-        if cr.status_code == 403:
-            raise RuntimeError("GitHub API 제한 또는 저장소 접근 거부.")
-        cr.raise_for_status()
-        info = cr.json() or {}
-        dl = info.get("download_url")
-        if not dl:
-            last_err = f"{rel} 다운로드 URL이 없습니다."
-            continue
-        return {
-            "id": f"file:{info.get('sha')}",
-            "name": info.get("name") or EXE_NAME,
-            "url": dl,
-            "size": info.get("size") or 0,
-            "tag": "",
-            "digest": "",
-            "git_sha": info.get("sha") or "",
-        }
-    raise RuntimeError(last_err)
+        if line.lower().startswith("sha256:"):
+            line = line.split(":", 1)[1].strip()
+        token = line.split()[0].lower().replace("sha256:", "")
+        if len(token) == 64 and all(c in "0123456789abcdef" for c in token):
+            return token
+    return ""
+
+
+def find_remote_exe() -> dict:
+    tag = latest_release_tag()
+    base = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{tag}"
+    hash_name = f"{EXE_NAME}.sha256"
+    r = _get(f"{base}/{hash_name}", timeout=20)
+    if r.status_code != 200 or not (r.text or "").strip():
+        raise RuntimeError(f"Release({tag})에 {hash_name} 파일이 없습니다.")
+    digest = _parse_sha256_text(r.text)
+    if not digest:
+        raise RuntimeError(f"{hash_name} 에서 SHA256을 읽지 못했습니다.")
+    return {
+        "id": digest,
+        "name": EXE_NAME,
+        "url": f"{base}/{EXE_NAME}",
+        "size": 0,
+        "tag": tag,
+        "digest": digest,
+        "git_sha": "",
+    }
 
 
 def local_file_hashes(path: Path) -> dict:
@@ -201,17 +189,32 @@ def check_update(root: Path, frozen: bool = False, current_version: str = "", ex
     try:
         if frozen:
             remote_info = find_remote_exe()
-            remote = remote_info["id"]
+            exe = Path(exe_path) if exe_path else (Path(root) / EXE_NAME)
+            if not exe.is_file():
+                raise RuntimeError("로컬 exe를 찾을 수 없습니다.")
+            local_sha = hashlib.sha256(exe.read_bytes()).hexdigest().lower()
+            remote_sha = (remote_info.get("digest") or "").lower()
             extra = {
                 "exe_url": remote_info["url"],
                 "url": remote_info["url"],
                 "exe_name": remote_info["name"],
-                "exe_size": remote_info["size"],
+                "exe_size": remote_info.get("size") or 0,
                 "tag": remote_info.get("tag") or "",
-                "digest": remote_info.get("digest") or "",
-                "git_sha": remote_info.get("git_sha") or "",
-                "id": remote_info.get("id") or "",
+                "digest": remote_sha,
+                "git_sha": "",
+                "id": remote_sha,
             }
+            available = bool(remote_sha) and remote_sha != local_sha
+            out = {
+                "ok": True,
+                "available": available,
+                "local": local_sha,
+                "remote": remote_sha,
+                "frozen": True,
+                "message": "새 exe가 있습니다." if available else "최신 버전입니다.",
+            }
+            out.update(extra)
+            return out
         else:
             rsrc = _get(f"{API_CONTENTS}/{REPO_DIR}/{APP_PY}?ref={GITHUB_BRANCH}", timeout=15)
             if rsrc.status_code != 200:
