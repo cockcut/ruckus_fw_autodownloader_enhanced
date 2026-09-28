@@ -66,6 +66,35 @@ COOKIE_FILE = APP_DIR / "cookies.txt"
 DS_SAVE_DIR = APP_DIR / "datasheet"
 
 
+def apply_app_icon(win):
+    bases = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bases.append(Path(sys._MEIPASS) / "assets")
+    bases.append(APP_DIR / "assets")
+    ico = png = None
+    for base in bases:
+        if ico is None and (base / "app.ico").is_file():
+            ico = base / "app.ico"
+        if png is None and (base / "app.png").is_file():
+            png = base / "app.png"
+    try:
+        if ico:
+            win.iconbitmap(default=str(ico) if isinstance(win, tk.Tk) else str(ico))
+            try:
+                win.iconbitmap(str(ico))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        if png:
+            img = tk.PhotoImage(file=str(png))
+            win.iconphoto(True, img)
+            win._app_icon_img = img
+    except Exception:
+        pass
+
+
 def open_save_folder(path: Path):
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
@@ -506,6 +535,7 @@ class FirmwareProgressWindow(tk.Toplevel):
     def __init__(self, master, items, dest_dir):
         super().__init__(master)
         self.title("다운로드 진행 상황")
+        apply_app_icon(self)
         self.cancel = threading.Event()
         self.done = False
         self.rows = []
@@ -567,6 +597,7 @@ class FirmwareApp(tk.Toplevel):
             self._owns_root = None
         super().__init__(master)
         self.title(f"Ruckus All Downloader {VERSION} (GUI)")
+        apply_app_icon(self)
         self.geometry("850x760")
         self.minsize(850, 760)
         self.resizable(False, False)
@@ -1301,6 +1332,7 @@ class DocumentProgressWindow(tk.Toplevel):
     def __init__(self, master, items, dest_dir):
         super().__init__(master)
         self.title("다운로드 진행 상황")
+        apply_app_icon(self)
         self.cancel = threading.Event()
         self.done = False
         self.rows = []
@@ -1357,6 +1389,7 @@ class DocumentApp(tk.Toplevel):
             self._owns_root = None
         super().__init__(master)
         self.title(f"Ruckus Document Downloader {VERSION} (GUI)")
+        apply_app_icon(self)
         self.geometry("850x760")
         self.minsize(850, 760)
         self.resizable(False, False)
@@ -2195,6 +2228,7 @@ class DatasheetProgressWindow(tk.Toplevel):
     def __init__(self, master, items, dest_dir):
         super().__init__(master)
         self.title("다운로드 진행 상황")
+        apply_app_icon(self)
         self.cancel = threading.Event()
         self.done = False
         self.rows = []
@@ -2254,6 +2288,7 @@ class DatasheetApp(tk.Toplevel):
             self._own_root = None
             super().__init__(master)
         self.title(f"Ruckus Datasheet Downloader {VERSION} (GUI)")
+        apply_app_icon(self)
         self.geometry("850x760")
         self.minsize(850, 760)
         self.resizable(False, False)
@@ -2548,6 +2583,7 @@ class UnifiedApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"Ruckus_All_Downloader {VERSION}")
+        apply_app_icon(self)
         self.geometry("980x500")
         self.minsize(980, 500)
         self.resizable(False, False)
