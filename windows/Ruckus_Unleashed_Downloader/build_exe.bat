@@ -61,7 +61,9 @@ echo.
 
 "%PY%" -m PyInstaller --noconfirm --clean --windowed --onefile ^
     --name "Ruckus_Unleashed_Downloader" ^
+    --icon "assets/app.ico" ^
     --distpath "dist" ^
+    --add-data "assets;assets" ^
     --add-data "get_ruckus_cookie.py;." ^
     --add-data "updater.py;." ^
     --hidden-import updater ^

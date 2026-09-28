@@ -64,6 +64,34 @@ else:
 COOKIE_FILE = APP_DIR / "cookies.txt"
 
 
+def apply_app_icon(win):
+    bases = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bases.append(Path(sys._MEIPASS) / "assets")
+    bases.append(APP_DIR / "assets")
+    ico = png = None
+    for base in bases:
+        if ico is None and (base / "app.ico").is_file():
+            ico = base / "app.ico"
+        if png is None and (base / "app.png").is_file():
+            png = base / "app.png"
+    try:
+        if ico:
+            try:
+                win.iconbitmap(default=str(ico))
+            except Exception:
+                win.iconbitmap(str(ico))
+    except Exception:
+        pass
+    try:
+        if png:
+            img = tk.PhotoImage(file=str(png))
+            win.iconphoto(True, img)
+            win._app_icon_img = img
+    except Exception:
+        pass
+
+
 def app_path(name: str) -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         bundled = Path(sys._MEIPASS) / name
@@ -438,6 +466,7 @@ class ProgressWindow(tk.Toplevel):
     def __init__(self, master, items, dest_dir):
         super().__init__(master)
         self.title("다운로드 진행 상황")
+        apply_app_icon(self)
         self.cancel = threading.Event()
         self.done = False
         self.rows = []
@@ -492,6 +521,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"Ruckus Unleashed Downloader {VERSION} (GUI)")
+        apply_app_icon(self)
         self.geometry("850x760")
         self.minsize(850, 760)
         self.resizable(False, False)
